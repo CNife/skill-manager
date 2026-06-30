@@ -40,15 +40,6 @@ def repos_cache_dir() -> Path:
     return cache_dir() / "repos"
 
 
-def repo_cache_path(repo: str) -> Path:
-    """Path of a cloned repo inside the cache.
-
-    ``repo`` is ``owner/repo``; the slash maps to a nested directory so distinct
-    owners never collide.
-    """
-    return repos_cache_dir() / repo
-
-
 def project_config_path(project_dir: Path | None = None) -> Path:
     """Path to the project's ``.skill-manager.json``."""
     base = Path(project_dir) if project_dir is not None else Path.cwd()
