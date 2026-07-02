@@ -21,6 +21,12 @@ app = typer.Typer(
     no_args_is_help=True,
 )
 
+source_app = typer.Typer(
+    help="Manage source repositories (list, add, remove, update).",
+    no_args_is_help=True,
+)
+app.add_typer(source_app, name="source")
+
 
 def run_sync(
     project_config: Path,
@@ -266,6 +272,91 @@ def disable() -> None:
             paths.project_skills_dir(),
         )
     except (ConfigError, SourceError, LinkError) as e:
+        typer.echo(f"Error: {e}", err=True)
+        raise typer.Exit(code=1) from e
+
+
+@source_app.command(name="list")
+def source_list() -> None:
+    """List registered source repositories with status."""
+    try:
+        global_cfg = config.load_global_config(paths.config_file())
+        cache_root = paths.repos_cache_dir()
+        for repo in sorted(global_cfg.sources):
+            src = global_cfg.sources[repo]
+            cached = (cache_root / repo).is_dir()
+            head = src.commit[:8] if src.commit else "-"
+            status = "cached" if cached else "missing"
+            typer.echo(f"  {repo:<20} {head:<9} {status:<8} {src.url}")
+    except ConfigError as e:
+        typer.echo(f"Error: {e}", err=True)
+        raise typer.Exit(code=1) from e
+
+
+@source_app.command(name="add")
+def source_add(repo: str) -> None:
+    """Add a source repository (clone to cache, register in global config)."""
+    try:
+        config.validate_repo(repo, "source add")
+        global_cfg = config.load_global_config(paths.config_file())
+        cache_root = paths.repos_cache_dir()
+        if repo in global_cfg.sources and (cache_root / repo).is_dir():
+            typer.echo(f"source {repo} already exists")
+            return
+        head = sources.ensure_source(repo, global_cfg, cache_root)
+        config.save_global_config(paths.config_file(), global_cfg)
+        typer.echo(f"added {repo} (HEAD {head[:8]})")
+    except (ConfigError, SourceError) as e:
+        typer.echo(f"Error: {e}", err=True)
+        raise typer.Exit(code=1) from e
+
+
+@source_app.command(name="remove")
+def source_remove(repo: str) -> None:
+    """Remove a source repository (delete cache + config entry)."""
+    try:
+        config.validate_repo(repo, "source remove")
+        global_cfg = config.load_global_config(paths.config_file())
+        cache_root = paths.repos_cache_dir()
+        if repo not in global_cfg.sources:
+            typer.echo(f"source {repo!r} not found", err=True)
+            raise typer.Exit(code=1)
+        try:
+            proj_cfg = config.load_project_config(paths.project_config_path())
+        except ConfigError:
+            proj_cfg = None  # not in a project dir, skip warning
+        if proj_cfg is not None and any(s.repo == repo for s in proj_cfg.skills):
+            typer.echo(
+                f"warning: project skills still reference {repo!r}, skills may break", err=True
+            )
+        sources.remove_source(repo, global_cfg, cache_root)
+        config.save_global_config(paths.config_file(), global_cfg)
+        typer.echo(f"removed {repo}")
+    except (ConfigError, SourceError) as e:
+        typer.echo(f"Error: {e}", err=True)
+        raise typer.Exit(code=1) from e
+
+
+@source_app.command(name="update")
+def source_update(
+    repo: str | None = typer.Argument(None, help="Repo to update (default: all)"),
+) -> None:
+    """Update source repository(ies) to latest (pull --ff-only)."""
+    try:
+        global_cfg = config.load_global_config(paths.config_file())
+        cache_root = paths.repos_cache_dir()
+        repos = [repo] if repo else sorted(global_cfg.sources)
+        if not repos:
+            typer.echo("No sources registered (use 'source add' first)")
+            return
+        for r in repos:
+            if r not in global_cfg.sources:
+                typer.echo(f"source {r!r} not registered (use 'source add' first)", err=True)
+                raise typer.Exit(code=1)
+            head = sources.ensure_source(r, global_cfg, cache_root)
+            config.save_global_config(paths.config_file(), global_cfg)
+            typer.echo(f"updated {r} (HEAD {head[:8]})")
+    except (ConfigError, SourceError) as e:
         typer.echo(f"Error: {e}", err=True)
         raise typer.Exit(code=1) from e
 

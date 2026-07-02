@@ -7,7 +7,7 @@ import typer
 from typer.testing import CliRunner
 
 from skill_manager.cli import app, run_list, run_sync
-from skill_manager.config import SkillRef, load_project_config
+from skill_manager.config import SkillRef, load_global_config, load_project_config
 from skill_manager.links import LinkError
 
 runner = CliRunner()
@@ -306,3 +306,168 @@ def test_run_disable_skips_external_symlink(
 
     # Symlink still exists because it pointed elsewhere
     assert (skills_dir / "read").is_symlink()
+
+
+# ── source list / add / remove / update ────────────────────────────────────────
+
+
+def test_source_list_help() -> None:
+    """``skill-manager source --help`` shows subcommands."""
+    result = runner.invoke(app, ["source", "--help"])
+    assert result.exit_code == 0
+    for cmd in ("list", "add", "remove", "update"):
+        assert cmd in result.stdout
+
+
+def test_source_list_empty(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """source list with no registered sources outputs nothing."""
+    monkeypatch.chdir(tmp_path)
+    result = runner.invoke(app, ["source", "list"])
+    assert result.exit_code == 0
+    assert result.stdout.strip() == ""
+
+
+def test_source_add_invalid_repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """source add with bad repo format exits 1."""
+    monkeypatch.chdir(tmp_path)
+    result = runner.invoke(app, ["source", "add", "not-owner-repo"])
+    assert result.exit_code == 1
+    assert "invalid repo" in result.output
+
+
+def test_source_remove_not_found(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """source remove non-existent source exits 1."""
+    monkeypatch.chdir(tmp_path)
+    result = runner.invoke(app, ["source", "remove", "x/y"])
+    assert result.exit_code == 1
+    assert "not found" in result.output
+
+
+def test_source_list_shows_registered(tmp_path: Path) -> None:
+    """source list shows registered sources with cached status."""
+    from skill_manager import paths
+    from skill_manager.config import GlobalConfig, Source, save_global_config
+
+    (paths.repos_cache_dir() / "tw93" / "Waza").mkdir(parents=True)
+    save_global_config(
+        paths.config_file(),
+        GlobalConfig(
+            sources={
+                "tw93/Waza": Source("tw93/Waza", "abc1234", "https://github.com/tw93/Waza.git"),
+            }
+        ),
+    )
+    result = runner.invoke(app, ["source", "list"])
+    assert result.exit_code == 0
+    assert "tw93/Waza" in result.stdout
+    assert "abc1234" in result.stdout
+    assert "cached" in result.stdout
+    assert "github.com/tw93/Waza" in result.stdout
+
+
+def test_source_add_duplicate(tmp_path: Path) -> None:
+    """source add on already-registered + cached source says already exists."""
+    from skill_manager import paths
+    from skill_manager.config import GlobalConfig, Source, save_global_config
+
+    (paths.repos_cache_dir() / "tw93" / "Waza").mkdir(parents=True)
+    save_global_config(
+        paths.config_file(),
+        GlobalConfig(
+            sources={
+                "tw93/Waza": Source("tw93/Waza", "abc1234", "https://github.com/tw93/Waza.git"),
+            }
+        ),
+    )
+    result = runner.invoke(app, ["source", "add", "tw93/Waza"])
+    assert result.exit_code == 0
+    assert "already exists" in result.stdout
+
+
+def test_source_remove_existing(tmp_path: Path) -> None:
+    """source remove deletes cache and config entry."""
+    from skill_manager import paths
+    from skill_manager.config import GlobalConfig, Source, save_global_config
+
+    (paths.repos_cache_dir() / "tw93" / "Waza").mkdir(parents=True)
+    save_global_config(
+        paths.config_file(),
+        GlobalConfig(
+            sources={
+                "tw93/Waza": Source("tw93/Waza", "abc1234", "https://github.com/tw93/Waza.git"),
+            }
+        ),
+    )
+    result = runner.invoke(app, ["source", "remove", "tw93/Waza"])
+    assert result.exit_code == 0
+    assert "removed" in result.stdout
+    assert not (paths.repos_cache_dir() / "tw93" / "Waza").exists()
+    cfg = load_global_config(paths.config_file())
+    assert "tw93/Waza" not in cfg.sources
+
+
+def test_source_remove_warns_on_project_ref(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """source remove warns if project skills still reference the repo."""
+    from skill_manager import paths
+    from skill_manager.config import GlobalConfig, Source, save_global_config
+
+    (paths.repos_cache_dir() / "tw93" / "Waza").mkdir(parents=True)
+    save_global_config(
+        paths.config_file(),
+        GlobalConfig(
+            sources={
+                "tw93/Waza": Source("tw93/Waza", "abc1234", "https://github.com/tw93/Waza.git"),
+            }
+        ),
+    )
+    monkeypatch.chdir(tmp_path)
+    _write_config(Path.cwd(), [{"name": "read", "repo": "tw93/Waza", "path": "skills/read"}])
+    result = runner.invoke(app, ["source", "remove", "tw93/Waza"])
+    assert result.exit_code == 0
+    assert "warning" in result.output
+    assert "removed" in result.stdout
+
+
+@pytest.mark.network
+def test_source_add_network(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """source add with a real (local) repo via mocked url."""
+    # Integration-level: uses actual git via file:// URL
+    import subprocess
+
+    from skill_manager import paths
+
+    repo_dir = tmp_path / "upstream"
+    repo_dir.mkdir(parents=True)
+    subprocess.run(["git", "init"], cwd=repo_dir, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "config", "user.email", "t@t"], cwd=repo_dir, check=True, capture_output=True
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "T"], cwd=repo_dir, check=True, capture_output=True
+    )
+    (repo_dir / "SKILL.md").write_text("# test\n", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=repo_dir, check=True, capture_output=True)
+    subprocess.run(["git", "commit", "-m", "init"], cwd=repo_dir, check=True, capture_output=True)
+    url = f"file://{repo_dir}"
+
+    from skill_manager.config import GlobalConfig, save_global_config
+    from skill_manager.sources import ensure_source
+
+    cfg = GlobalConfig()
+    head = ensure_source("test/foo", cfg, paths.repos_cache_dir(), url=url)
+    save_global_config(paths.config_file(), cfg)
+
+    result = runner.invoke(app, ["source", "list"])
+    assert result.exit_code == 0
+    assert "test/foo" in result.stdout
+    assert "cached" in result.stdout
+    assert head[:8] in result.stdout
+
+
+def test_source_update_help() -> None:
+    """``skill-manager source update --help`` shows optional repo arg."""
+    result = runner.invoke(app, ["source", "update", "--help"])
+    assert result.exit_code == 0
+    assert "REPO" in result.stdout  # optional argument shown
