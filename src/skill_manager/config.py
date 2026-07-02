@@ -165,3 +165,14 @@ def save_global_config(path: Path, config: GlobalConfig) -> None:
         }
     }
     path.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def save_project_config(path: Path, config: ProjectConfig) -> None:
+    """Save a ProjectConfig back to a JSON file.
+
+    Creates parent directories if they don't exist. Uses the same JSON
+    shape as load_project_config expects.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    data = {"skills": [{"name": s.name, "repo": s.repo, "path": s.path} for s in config.skills]}
+    path.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")

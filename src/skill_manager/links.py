@@ -29,9 +29,8 @@ def link_points_to(link: Path, target: Path) -> bool:
     """True if ``link`` is a symlink whose stored target resolves to ``target``."""
     if not link.is_symlink():
         return False
-    # os.readlink gives the stored (possibly relative) path; resolve against link's dir
-    stored = os.readlink(link)
-    resolved = (link.parent / stored).resolve() if not Path(stored).is_absolute() else Path(stored)
+    stored = Path(os.readlink(link))
+    resolved = (link.parent / stored).resolve() if not stored.is_absolute() else stored
     return resolved == target.resolve()
 
 

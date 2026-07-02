@@ -13,6 +13,7 @@ from skill_manager.config import (
     load_global_config,
     load_project_config,
     save_global_config,
+    save_project_config,
 )
 
 
@@ -172,3 +173,27 @@ def test_global_config_roundtrip(tmp_path: Path) -> None:
     )
     save_global_config(p, cfg)
     assert load_global_config(p) == cfg
+
+
+def test_save_project_config_roundtrip(tmp_path: Path) -> None:
+    """Save then load a ProjectConfig, verify round-trip equality."""
+    p = tmp_path / ".skill-manager.json"
+    cfg = ProjectConfig(
+        skills=[
+            SkillRef("read", "tw93/Waza", "skills/read"),
+            SkillRef("kami", "tw93/Kami", "."),
+        ]
+    )
+    save_project_config(p, cfg)
+    loaded = load_project_config(p)
+    assert loaded.skills == cfg.skills
+
+
+def test_save_project_config_creates_parent_dir(tmp_path: Path) -> None:
+    """save_project_config creates parent directories automatically."""
+    p = tmp_path / "a" / "b" / ".skill-manager.json"
+    cfg = ProjectConfig(skills=[SkillRef("read", "tw93/Waza", "skills/read")])
+    save_project_config(p, cfg)
+    assert p.is_file()
+    loaded = load_project_config(p)
+    assert loaded.skills == cfg.skills
