@@ -197,10 +197,7 @@ def test_disable_no_skills(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> N
     assert "No enabled skills to disable" in result.output
 
 
-def test_run_enable_adds_and_syncs(
-    tmp_path: Path, make_source_repo, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """run_enable scans cached repo, adds skill to config, and syncs."""
+def _enable_test_env(tmp_path: Path, make_source_repo):
     repo = make_source_repo("waza", {"skills/read": "# read\n"})
     url = f"file://{repo}"
     project = tmp_path / "proj"
@@ -208,30 +205,28 @@ def test_run_enable_adds_and_syncs(
     cache = tmp_path / "repos"
     gconfig = tmp_path / "config.json"
     skills_dir = project / ".agents" / "skills"
-
-    # Initial sync to populate cache
     _write_config(project, [{"name": "read", "repo": "tw93/Waza", "path": "skills/read"}])
     run_sync(
         project / ".skill-manager.json", gconfig, cache, skills_dir, url_resolver=lambda r: url
     )
+    return project, cache, gconfig, skills_dir
 
-    # Now remove the skill from config
-    _write_config(project, [])
 
-    # Run enable with simulated user input: repo #1, skill #1
-    inputs = iter(["1", "1"])
-    monkeypatch.setattr("builtins.input", lambda prompt="": next(inputs))
+def test_run_enable_adds_and_syncs(
+    tmp_path: Path, make_source_repo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """run_enable scans cached repo, adds skill to config, and syncs."""
+    project, cache, gconfig, skills_dir = _enable_test_env(tmp_path, make_source_repo)
+    _write_config(project, [])  # clear config so we can re-add via enable
 
     from skill_manager.cli import run_enable
 
+    monkeypatch.setattr("builtins.input", lambda prompt="": next(iter(["1", "1"])))
     run_enable(project / ".skill-manager.json", gconfig, cache, skills_dir)
-
-    # Verify config updated
 
     proj = load_project_config(project / ".skill-manager.json")
     assert len(proj.skills) == 1
     assert proj.skills[0] == SkillRef("read", "tw93/Waza", "skills/read")
-    # Verify symlink created
     assert (skills_dir / "read").is_symlink()
 
 
@@ -239,26 +234,12 @@ def test_run_enable_duplicate(
     tmp_path: Path, make_source_repo, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """run_enable with an already-enabled skill name errors."""
-    repo = make_source_repo("waza", {"skills/read": "# read\n"})
-    url = f"file://{repo}"
-    project = tmp_path / "proj"
-    project.mkdir()
-    cache = tmp_path / "repos"
-    gconfig = tmp_path / "config.json"
-    skills_dir = project / ".agents" / "skills"
-
-    # Initial sync to populate cache and have it in config
-    _write_config(project, [{"name": "read", "repo": "tw93/Waza", "path": "skills/read"}])
-    run_sync(
-        project / ".skill-manager.json", gconfig, cache, skills_dir, url_resolver=lambda r: url
-    )
-
-    # Run enable for the same skill
-    inputs = iter(["1", "1"])
-    monkeypatch.setattr("builtins.input", lambda prompt="": next(inputs))
+    project, cache, gconfig, skills_dir = _enable_test_env(tmp_path, make_source_repo)
+    # Keep config as-is so the skill is already enabled
 
     from skill_manager.cli import run_enable
 
+    monkeypatch.setattr("builtins.input", lambda prompt="": next(iter(["1", "1"])))
     with pytest.raises(typer.Exit):
         run_enable(project / ".skill-manager.json", gconfig, cache, skills_dir)
 

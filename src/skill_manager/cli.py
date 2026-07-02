@@ -106,16 +106,15 @@ def _scan_skills(repo_dir: Path, repo: str) -> list[tuple[str, str]]:
     Returns list of (name, path) tuples.
     """
     skills: list[tuple[str, str]] = []
-    if (repo_dir / "SKILL.md").is_file():
-        name = repo.split("/")[-1].lower()
-        skills.append((name, "."))
     for skmd in sorted(repo_dir.rglob("SKILL.md")):
         skill_dir = skmd.parent
         if skill_dir == repo_dir:
-            continue
-        name = skill_dir.name
-        rel_path = str(skill_dir.relative_to(repo_dir))
-        skills.append((name, rel_path))
+            name = Path(repo).name.lower()
+            path = "."
+        else:
+            name = skill_dir.name
+            path = str(skill_dir.relative_to(repo_dir))
+        skills.append((name, path))
     return skills
 
 
