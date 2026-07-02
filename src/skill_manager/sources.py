@@ -6,6 +6,7 @@ global config. All git calls use subprocess with list arguments (no shell).
 
 from __future__ import annotations
 
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -54,3 +55,21 @@ def ensure_source(
     head = _run_git(["rev-parse", "HEAD"], cwd=dest)
     global_config.sources[repo] = Source(repo=repo, commit=head, url=actual_url)
     return head
+
+
+def remove_source(
+    repo: str,
+    global_config: GlobalConfig,
+    cache_root: Path,
+) -> bool:
+    """Remove a source repo from global config and delete its cached clone.
+
+
+    Returns ``True`` if the cache directory was actually deleted.
+    """
+    dest = cache_root / repo
+    had_cache = dest.is_dir()
+    if had_cache:
+        shutil.rmtree(dest)
+    del global_config.sources[repo]
+    return had_cache

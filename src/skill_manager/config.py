@@ -72,6 +72,18 @@ def _validate_repo(repo: str, name: str, path: Path) -> None:
         raise ConfigError(f"skill {name!r} repo {repo!r} must be safe 'owner/repo' in {path}")
 
 
+def validate_repo(repo: str, context: str) -> None:
+    """Validate that ``repo`` is a safe ``owner/repo`` format.
+
+
+    Returns ``None`` on success; raises ``ConfigError`` with a message
+    including ``context`` (e.g. the CLI command name) on failure.
+    """
+    parts = repo.split("/")
+    if len(parts) != 2 or not all(_is_safe_repo_component(part) for part in parts):
+        raise ConfigError(f"invalid repo {repo!r}: must be 'owner/repo' ({context})")
+
+
 def _validate_path(skill_path: str, name: str, path: Path) -> None:
     if skill_path == ".":
         return

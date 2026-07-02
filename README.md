@@ -34,6 +34,17 @@ skill-manager sync   # clone/fetch sources, link declared skills
 skill-manager list   # show sources and skill status
 ```
 
+
+### Source repository management
+
+```bash
+skill-manager source list              # list cached repos and HEAD status
+skill-manager source add <owner/repo>  # add and clone a new source
+skill-manager source remove <repo>     # remove source (cache + config)
+skill-manager source update [repo]     # update one or all sources
+```
+
+
 `sync` is idempotent and never overwrites an existing non-tool symlink (it skips with a notice). Sources are derived from the declared skills' `repo` fields.
 
 ## Paths (XDG)
