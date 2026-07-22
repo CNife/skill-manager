@@ -1,14 +1,14 @@
 ---
 name: e2e-happy-path
-description: End-to-end happy-path test for skill-manager - declares the public fixture, syncs, and asserts the correct path. User-invoked only, run before PR.
+description: End-to-end happy-path test for skill-manager — declares the public fixture, syncs, and asserts the correct path. Run before PR.
 disable-model-invocation: true
 ---
 
 # E2E happy-path test for skill-manager
 
-Verify skill-manager's **correct path** end to end: a declared skill is cloned from a real public GitHub repo, linked into `.agents/skills/`, and its `SKILL.md` stays readable. The test object is skill-manager itself; pi's own skill discovery is out of scope.
+Verify skill-manager's **correct path** end to end: a declared skill is cloned from a real public GitHub repo, linked into `.agents/skills/`, and its `SKILL.md` stays readable. The test object is skill-manager itself.
 
-The split is fixed: a bash **script** runs the deterministic flow (isolate, declare, sync) and emits a **manifest**; you, the agent, do the orchestration, assertions, and human-readable verdict. The script asserts nothing.
+The split is fixed: a bash **script** runs the deterministic flow (isolate, declare, sync) and emits a **manifest**; you, the agent, do the orchestration, assertions, and human-readable verdict.
 
 ## Preconditions
 
@@ -30,10 +30,10 @@ Execute the script and capture the full stdout and exit code. It builds an isola
 
 ### 2. Route on exit code
 
-- **Non-zero exit**: an **infra failure** - setup or sync broke. Grep the `E2E_MANIFEST` line for `root` (preserve that tmpdir for triage), read stderr. Skip the assertions; go straight to the verdict.
+- **Non-zero exit**: an **infra failure** — setup or sync broke. Grep the `E2E_MANIFEST` line for `root` (preserve that tmpdir for triage), read stderr, and go straight to the verdict.
 - **Zero exit**: sync succeeded; continue to assertion.
 
-**Completion criterion**: you have decided this is an infra failure (verdict path) or a sync success (assertion path) - not both, not neither.
+**Completion criterion**: you have routed to exactly one path — infra failure (verdict) or sync success (assertion).
 
 ### 3. Parse the manifest
 
@@ -53,11 +53,11 @@ Let `REPO=CNife/skill-manager-e2e-fixture` and `CACHE=$xdg_cache_home/skill-mana
 
 1. **Symlink valid**: `$project_dir/.agents/skills/e2e-fixture` is a symlink whose resolved target equals `$CACHE`.
 2. **SKILL.md readable**: reading `SKILL.md` through that symlink, its first line is `---`.
-3. **Ledger HEAD consistent**: in `$xdg_config_home/skill-manager/config.json`, `sources["CNife/skill-manager-e2e-fixture"].commit` equals `git -C "$CACHE" rev-parse HEAD`. Consistency, never a hardcoded commit.
+3. **Ledger HEAD consistent**: in `$xdg_config_home/skill-manager/config.json`, `sources["CNife/skill-manager-e2e-fixture"].commit` equals `git -C "$CACHE" rev-parse HEAD` (compare the two live values).
 4. **Clone happened**: `$CACHE/.git` exists.
 5. **sync output**: the script stdout excluding the `E2E_MANIFEST` line contains both `ensured CNife/skill-manager-e2e-fixture` and `created e2e-fixture`.
 
-**Completion criterion**: every one of the five points has been asserted and carries a pass/fail plus evidence - none skipped.
+**Completion criterion**: every one of the five points has been asserted and carries a pass/fail plus evidence.
 
 ### 5. Verdict
 

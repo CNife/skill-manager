@@ -13,7 +13,7 @@ _Avoid_: package, installable, 包
 _Avoid_: registry, remote, 远端, 注册表
 
 **Skill declaration / 技能声明**:
-项目配置中的一条启用记录，由 `name`、`repo`、`path` 组成（代码中为 `SkillRef`）。
+项目配置中的一条启用记录，由 `name`、`repo`、`path` 组成。
 _Avoid_: skill ref, entry, 安装项
 
 **Project config / 项目配置**:
