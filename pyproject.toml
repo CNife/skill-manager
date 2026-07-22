@@ -1,5 +1,5 @@
 [project]
-name = "skill-manager"
+name = "cnife-skill-manager"
 dynamic = ["version"]
 description = "Project-scoped declarative skill manager for agent skills"
 readme = "README.md"
