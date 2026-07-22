@@ -18,7 +18,13 @@ Today skill-manager only writes project Links under `./.agents/skills/`. Managin
 ## Install
 
 ```bash
-uv tool install .  # or run in-place: uv run skill-manager
+uv tool install cnife-skill-manager
+# or: pipx install cnife-skill-manager
+
+# from source (dev):
+uv tool install .
+# or run in-place:
+uv run skill-manager
 ```
 
 ## Configure
