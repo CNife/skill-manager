@@ -1,11 +1,11 @@
 # Skill Manager
 
-按项目声明式启用 pi agent 技能：从 GitHub 源仓库缓存技能，再以符号链接暴露到当前项目。
+按项目声明式启用 coding agent 技能：Skill 只在 Source 中保留一份，项目通过符号链接引用，全局技能保持精简。
 
 ## Language
 
 **Skill / 技能**:
-含 `SKILL.md` 的目录，是可被项目启用的 pi agent 技能单元。
+含 `SKILL.md` 的目录，可被遵守 `./.agents/skills/`（及可选 `~/.agents/skills/`）约定的 coding agent 启用。
 _Avoid_: package, installable, 包
 
 **Source / 源仓库**:

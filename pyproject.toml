@@ -1,7 +1,7 @@
 [project]
 name = "skill-manager"
 version = "0.1.0"
-description = "Project-scoped declarative skill manager for pi agent skills"
+description = "Project-scoped declarative skill manager for agent skills"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
