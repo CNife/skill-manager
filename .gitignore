@@ -13,3 +13,6 @@ build/
 .ruff_cache/
 .coverage
 htmlcov/
+
+# hatch-vcs generated
+src/skill_manager/_version.py

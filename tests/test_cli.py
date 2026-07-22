@@ -17,6 +17,15 @@ def _write_config(project: Path, skills: list[dict]) -> None:
     (project / ".skill-manager.json").write_text(json.dumps({"skills": skills}), encoding="utf-8")
 
 
+def test_version_option() -> None:
+    from skill_manager import __version__
+
+    result = runner.invoke(app, ["--version"])
+    assert result.exit_code == 0
+    assert "skill-manager" in result.stdout
+    assert __version__ in result.stdout
+
+
 def test_sync_help() -> None:
     result = runner.invoke(app, ["sync", "--help"])
     assert result.exit_code == 0

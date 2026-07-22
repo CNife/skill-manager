@@ -7,10 +7,11 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from pathlib import Path
+from typing import Annotated
 
 import typer
 
-from skill_manager import config, links, paths, sources
+from skill_manager import __version__, config, links, paths, sources
 from skill_manager.config import ConfigError
 from skill_manager.links import LinkError
 from skill_manager.sources import SourceError
@@ -26,6 +27,27 @@ source_app = typer.Typer(
     no_args_is_help=True,
 )
 app.add_typer(source_app, name="source")
+
+
+def _version_callback(value: bool) -> None:
+    if value:
+        typer.echo(f"skill-manager {__version__}")
+        raise typer.Exit()
+
+
+@app.callback()
+def _root(
+    version: Annotated[
+        bool,
+        typer.Option(
+            "--version",
+            help="Show version and exit.",
+            callback=_version_callback,
+            is_eager=True,
+        ),
+    ] = False,
+) -> None:
+    """Project-scoped declarative skill manager for agent skills."""
 
 
 def run_sync(
