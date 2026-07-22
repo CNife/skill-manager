@@ -68,9 +68,9 @@ skill-manager source update [repo]     # update one or all sources
 
 ## Roadmap
 
-- **Global skills** — manage Links under `~/.agents/skills/` (same model as project Links)
-- **Non-interactive enable/disable** — CLI flags for scripts and CI
-- **Broader sources** — arbitrary Git URLs; local git repos or folders as Sources
-- **Source inspect** — list skill paths in a Source before enabling
-- **Hidden-dir scan policy** — skip skills under hidden directories by default; `--all` to include them
-- **Pinned versions** — pin a Source to a commit or tag in the project declaration
+- [ ] **Global skills** — manage Links under `~/.agents/skills/` (same model as project Links)
+- [ ] **Non-interactive enable/disable** — CLI flags for scripts and CI
+- [ ] **Broader sources** — arbitrary Git URLs; local git repos or folders as Sources
+- [ ] **Source inspect** — list skill paths in a Source before enabling
+- [ ] **Hidden-dir scan policy** — skip skills under hidden directories by default; `--all` to include them
+- [ ] **Pinned versions** — pin a Source to a commit or tag in the project declaration
