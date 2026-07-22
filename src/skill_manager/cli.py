@@ -17,7 +17,7 @@ from skill_manager.sources import SourceError
 
 app = typer.Typer(
     name="skill-manager",
-    help="Project-scoped declarative skill manager for pi agent skills.",
+    help="Project-scoped declarative skill manager for agent skills.",
     no_args_is_help=True,
 )
 
