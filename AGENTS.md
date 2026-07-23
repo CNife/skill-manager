@@ -1,5 +1,10 @@
 ## Agent skills
 
+### Language
+
+- README 与 CLI 输出用英文（对外产品面）
+- 开发协作（issue、ADR、agent 交流）用中文
+
 ### Issue tracker
 
 Issues live as GitHub issues in this repo, via the `gh` CLI. See `docs/agents/issue-tracker.md`.
