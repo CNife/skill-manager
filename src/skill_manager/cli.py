@@ -585,10 +585,9 @@ def _enable_noninteractive(
         raise NotFoundError(msg)
     if len(matches) > 1:
         paths_list = ", ".join(p for _, p in matches)
-        msg = f"skill {name!r} is ambiguous in {repo!r}; matching paths: {paths_list}"
-        if not include_all:
-            msg += _ALL_HINT
-        raise NotFoundError(msg)
+        raise NotFoundError(
+            f"skill {name!r} is ambiguous in {repo!r}; matching paths: {paths_list}"
+        )
     _matched_name, skill_path = matches[0]
     return _enable_apply(
         project_config,
@@ -802,7 +801,7 @@ def enable(
         bool,
         typer.Option(
             "--all",
-            help="Include hidden (dot-dir) and internal skills when discovering.",
+            help="Include hidden (dot-dir) and internal skills.",
         ),
     ] = False,
 ) -> None:
