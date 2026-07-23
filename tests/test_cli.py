@@ -3,7 +3,6 @@ import shutil
 from pathlib import Path
 
 import pytest
-import typer
 from typer.testing import CliRunner
 
 from skill_manager.cli import app, run_list, run_sync
@@ -105,7 +104,7 @@ def test_run_sync_path_not_found(tmp_path: Path, make_source_repo) -> None:
         )
 
 
-def test_run_list(tmp_path: Path, make_source_repo, capsys: pytest.CaptureFixture[str]) -> None:
+def test_run_list(tmp_path: Path, make_source_repo) -> None:
     repo = make_source_repo("waza", {"skills/read": "# read\n"})
     url = f"file://{repo}"
     project = tmp_path / "proj"
@@ -117,18 +116,14 @@ def test_run_list(tmp_path: Path, make_source_repo, capsys: pytest.CaptureFixtur
     run_sync(
         project / ".skill-manager.json", gconfig, cache, skills_dir, url_resolver=lambda r: url
     )
-    run_list(project / ".skill-manager.json", gconfig, cache, skills_dir)
-    captured = capsys.readouterr()
-    assert "tw93/Waza" in captured.out
-    assert "read" in captured.out
-    assert "linked" in captured.out
+    result = run_list(project / ".skill-manager.json", gconfig, cache, skills_dir)
+    assert any(row[0] == "tw93/Waza" for row in result.source_rows)
+    assert len(result.skills) == 1
+    assert result.skills[0].name == "read"
+    assert result.skills[0].link == "linked"
 
 
-def test_run_list_external_symlink(
-    tmp_path: Path,
-    make_source_repo,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
+def test_run_list_external_symlink(tmp_path: Path, make_source_repo) -> None:
     repo = make_source_repo("waza", {"skills/read": "# read\n"})
     url = f"file://{repo}"
     project = tmp_path / "proj"
@@ -145,14 +140,11 @@ def test_run_list_external_symlink(
     run_sync(
         project / ".skill-manager.json", gconfig, cache, skills_dir, url_resolver=lambda r: url
     )
-    run_list(project / ".skill-manager.json", gconfig, cache, skills_dir)
-    captured = capsys.readouterr()
-    assert "read  tw93/Waza:skills/read  external" in captured.out
+    result = run_list(project / ".skill-manager.json", gconfig, cache, skills_dir)
+    assert result.skills[0].link == "external"
 
 
-def test_run_list_broken(
-    tmp_path: Path, make_source_repo, capsys: pytest.CaptureFixture[str]
-) -> None:
+def test_run_list_broken(tmp_path: Path, make_source_repo) -> None:
     repo = make_source_repo("waza", {"skills/read": "# read\n"})
     url = f"file://{repo}"
     project = tmp_path / "proj"
@@ -166,9 +158,8 @@ def test_run_list_broken(
     )
     # remove the cached skill target -> symlink now dangles but still points at the declared path
     shutil.rmtree(cache / "tw93" / "Waza" / "skills" / "read")
-    run_list(project / ".skill-manager.json", gconfig, cache, skills_dir)
-    captured = capsys.readouterr()
-    assert "read  tw93/Waza:skills/read  broken" in captured.out
+    result = run_list(project / ".skill-manager.json", gconfig, cache, skills_dir)
+    assert result.skills[0].link == "broken"
 
 
 # ── enable / disable ──────────────────────────────────────────────────────────
@@ -242,15 +233,17 @@ def test_run_enable_adds_and_syncs(
 def test_run_enable_duplicate(
     tmp_path: Path, make_source_repo, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """run_enable with an already-enabled skill name errors."""
+    """run_enable with an already-enabled skill name is idempotent success."""
     project, cache, gconfig, skills_dir = _enable_test_env(tmp_path, make_source_repo)
     # Keep config as-is so the skill is already enabled
 
     from skill_manager.cli import run_enable
 
     monkeypatch.setattr("builtins.input", lambda prompt="": next(iter(["1", "1"])))
-    with pytest.raises(typer.Exit):
-        run_enable(project / ".skill-manager.json", gconfig, cache, skills_dir)
+    result = run_enable(project / ".skill-manager.json", gconfig, cache, skills_dir)
+    assert result.action == "already_enabled"
+    assert result.skill["name"] == "read"
+    assert result.sync is None
 
 
 def test_run_disable_removes_and_cleans(
@@ -324,7 +317,7 @@ def test_source_list_help() -> None:
     """``skill-manager source --help`` shows subcommands."""
     result = runner.invoke(app, ["source", "--help"])
     assert result.exit_code == 0
-    for cmd in ("list", "add", "remove", "update"):
+    for cmd in ("list", "add", "remove", "update", "available-skills"):
         assert cmd in result.stdout
 
 

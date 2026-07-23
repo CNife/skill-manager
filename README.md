@@ -12,8 +12,9 @@ Today skill-manager only writes project Links under `./.agents/skills/`. Managin
 
 - **Declare and sync project skills** — write `.skill-manager.json`, run `skill-manager sync`
 - **Inspect source and link status** — `skill-manager list` (`linked` / `external` / `broken` / `unlinked`)
-- **Enable / disable interactively** — `skill-manager enable` / `disable`
-- **Manage source cache** — `skill-manager source list|add|remove|update`
+- **Enable / disable** — interactive menus, or non-interactive `enable <repo> <name>` / `disable <name>`
+- **Manage source cache** — `skill-manager source list|add|remove|update|available-skills`
+- **Scripting / CI** — root `--json` on every command (`skill-manager --json <cmd> ...`)
 
 ## Install
 
@@ -47,22 +48,31 @@ Create `./.skill-manager.json` in your project:
 ## Usage
 
 ```bash
-skill-manager sync      # clone/fetch sources, link declared skills
-skill-manager list      # show sources and skill status
-skill-manager enable    # interactively add a skill from the cache, then sync
-skill-manager disable   # interactively remove a skill and its link
+skill-manager sync                     # clone/fetch sources, link declared skills
+skill-manager list                     # show sources and skill status
+skill-manager enable                   # interactive: pick cached repo + skill, then sync
+skill-manager enable <repo> <name>     # non-interactive enable (path derived from cache)
+skill-manager disable                  # interactive: pick an enabled skill
+skill-manager disable <name>           # non-interactive disable
+skill-manager --json sync              # single JSON object on stdout (all commands)
 ```
 
 ### Source repository management
 
 ```bash
-skill-manager source list              # list cached repos and HEAD status
-skill-manager source add <owner/repo>  # add and clone a new source
-skill-manager source remove <repo>     # remove source (cache + config)
-skill-manager source update [repo]     # update one or all sources
+skill-manager source list                    # list registered sources and HEAD status
+skill-manager source add <owner/repo>        # add and clone a new source
+skill-manager source remove <repo>           # remove source (cache + config)
+skill-manager source update [repo]           # update one or all sources
+skill-manager source available-skills [repo] # list skills in the cache (no project config)
 ```
 
 `sync` is idempotent and never overwrites an existing non-tool symlink (it skips with a notice). Sources are derived from the declared skills' `repo` fields.
+
+With `--json`, success is `{"ok": true, "data": ...}` and failure is
+`{"ok": false, "error": {"code", "message"}}` (exit `0` / `1` / `2` for success /
+business error / usage error). Place `--json` before the subcommand:
+`skill-manager --json list`, not `skill-manager list --json`.
 
 ## Paths (XDG)
 

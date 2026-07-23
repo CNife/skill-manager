@@ -37,9 +37,9 @@ _Avoid_: install, copy, 安装
 _Avoid_: restore, apply, 恢复, 应用
 
 **enable / 启用**:
-交互式向项目配置追加一条 Skill declaration，并执行 sync。
+向项目配置追加一条 Skill declaration 并执行 sync；可交互选单，也可 `enable <repo> <name>` 非交互。
 _Avoid_: add, install, 添加, 安装
 
 **disable / 禁用**:
-交互式从项目配置移除一条 Skill declaration，并清理对应 Link。
+从项目配置移除一条 Skill declaration 并清理对应 Link；可交互选单，也可 `disable <name>` 非交互。
 _Avoid_: remove, uninstall, 删除, 卸载
