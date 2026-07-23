@@ -74,9 +74,19 @@ skill-manager source update [repo]     # update one or all sources
 
 ## Roadmap
 
-- [ ] **Global skills** — manage Links under `~/.agents/skills/` (same model as project Links)
-- [ ] **Non-interactive enable/disable** — CLI flags for scripts and CI
-- [ ] **Broader sources** — arbitrary Git URLs; local git repos or folders as Sources
-- [ ] **Source inspect** — list skill paths in a Source before enabling
-- [ ] **Hidden-dir scan policy** — skip skills under hidden directories by default; `--all` to include them
-- [ ] **Pinned versions** — pin a Source to a commit or tag in the project declaration
+The **What** — actionable tickets — lives in the [issue tracker](https://github.com/CNife/skill-manager/issues). This section is the **Why**: the shape skill-manager is growing toward.
+
+### Dual-user design
+
+skill-manager has two users, and every surface must serve both:
+
+- **Humans** — an interactive CLI, and a project config (`.skill-manager.json`) simple enough to read and edit by hand.
+- **Agents** — batch-friendly flags and machine-readable output for scripts, CI, and AFK coding agents.
+
+### Any source
+
+A Source shouldn't be locked to `owner/repo` on GitHub. Arbitrary Git URLs and local directories should qualify too. Pinning a Source to a specific commit or tag for reproducibility is a lower-priority future direction.
+
+### One model, project and global
+
+Project Links and user-global Links (`~/.agents/skills/`) should share one declaration-and-sync model: keep globals slim, declare per project what you actually need.
