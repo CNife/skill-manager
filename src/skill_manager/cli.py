@@ -346,21 +346,97 @@ def _list_cached_repos(cache_root: Path) -> list[str]:
     return repos
 
 
-def _scan_skills(repo_dir: Path, repo: str) -> list[tuple[str, str]]:
-    """Scan a repo directory for skill directories (containing SKILL.md).
+# Directories skipped during default Source skill discovery (noise trees).
+_SKIP_DIR_NAMES = frozenset({"node_modules", "dist", "build", "__pycache__"})
 
-    Returns list of (name, path) tuples.
+_ALL_HINT = " (hint: use --all to include hidden or internal skills)"
+
+
+def _is_internal_skill(skill_md: Path) -> bool:
+    """True only when SKILL.md frontmatter has metadata.internal as YAML bool true."""
+    try:
+        text = skill_md.read_text(encoding="utf-8")
+    except OSError:
+        return False
+    if not text.startswith("---"):
+        return False
+    # Frontmatter ends at the next line that is exactly ---
+    lines = text.splitlines()
+    if not lines or lines[0].strip() != "---":
+        return False
+    end_idx = None
+    for i in range(1, len(lines)):
+        if lines[i].strip() == "---":
+            end_idx = i
+            break
+    if end_idx is None:
+        return False
+    return _metadata_internal_is_true(lines[1:end_idx])
+
+
+def _metadata_internal_is_true(fm_lines: list[str]) -> bool:
+    """Parse a minimal YAML subset: top-level metadata.internal == true."""
+    in_metadata = False
+    metadata_indent: int | None = None
+    for raw in fm_lines:
+        if not raw.strip() or raw.lstrip().startswith("#"):
+            continue
+        # Only spaces count as YAML indentation here.
+        indent = len(raw) - len(raw.lstrip(" "))
+        stripped = raw.strip()
+        if in_metadata and metadata_indent is not None:
+            if indent <= metadata_indent:
+                in_metadata = False
+            else:
+                if stripped.startswith("internal:"):
+                    value = stripped[len("internal:") :].strip()
+                    # YAML 1.2 boolean true only (true/True/TRUE).
+                    return value in {"true", "True", "TRUE"}
+                continue
+        if stripped == "metadata:" or stripped.startswith("metadata:"):
+            rest = stripped[len("metadata:") :].strip()
+            if rest:
+                # Inline / non-mapping forms are not treated as internal.
+                return False
+            in_metadata = True
+            metadata_indent = indent
+    return False
+
+
+def _scan_skills(repo_dir: Path, repo: str, *, include_all: bool = False) -> list[tuple[str, str]]:
+    """Discover skills under a cached Source checkout.
+
+    Default (include_all=False): skip noise dir names, dot-directories, and
+    skills with metadata.internal: true. Always stop recursion at a skill root
+    (directory containing SKILL.md). Returns list of (name, path) tuples.
     """
     skills: list[tuple[str, str]] = []
-    for skmd in sorted(repo_dir.rglob("SKILL.md")):
-        skill_dir = skmd.parent
-        if skill_dir == repo_dir:
-            name = Path(repo).name.lower()
-            path = "."
-        else:
-            name = skill_dir.name
-            path = str(skill_dir.relative_to(repo_dir))
-        skills.append((name, path))
+
+    def visit(current: Path) -> None:
+        skill_md = current / "SKILL.md"
+        if skill_md.is_file():
+            if include_all or not _is_internal_skill(skill_md):
+                if current == repo_dir:
+                    name = Path(repo).name.lower()
+                    rel = "."
+                else:
+                    name = current.name
+                    rel = str(current.relative_to(repo_dir))
+                skills.append((name, rel))
+            return  # skill-root truncation (always)
+
+        try:
+            entries = sorted(current.iterdir(), key=lambda p: p.name)
+        except OSError:
+            return
+        for entry in entries:
+            if not entry.is_dir():
+                continue
+            if not include_all and (entry.name in _SKIP_DIR_NAMES or entry.name.startswith(".")):
+                continue
+            visit(entry)
+
+    visit(repo_dir)
     return skills
 
 
@@ -389,6 +465,7 @@ def run_enable(
     *,
     repo: str | None = None,
     name: str | None = None,
+    include_all: bool = False,
     url_resolver: Callable[[str], str] | None = None,
     emit: Callable[[str], None] | None = None,
 ) -> EnableResult:
@@ -396,10 +473,16 @@ def run_enable(
 
     Non-interactive when both ``repo`` and ``name`` are provided. Interactive
     when both are omitted. Partial args are a usage error (raised by caller).
+    ``include_all`` widens Source skill discovery (hidden / internal).
     """
     if repo is None and name is None:
         return _enable_interactive(
-            project_config, global_config_path, cache_root, skills_dir, emit=emit
+            project_config,
+            global_config_path,
+            cache_root,
+            skills_dir,
+            include_all=include_all,
+            emit=emit,
         )
     if repo is None or name is None:
         raise click.exceptions.UsageError(
@@ -412,6 +495,7 @@ def run_enable(
         skills_dir,
         repo=repo,
         name=name,
+        include_all=include_all,
         url_resolver=url_resolver,
         emit=emit,
     )
@@ -429,6 +513,7 @@ def _enable_interactive(
     cache_root: Path,
     skills_dir: Path,
     *,
+    include_all: bool,
     emit: Callable[[str], None] | None,
 ) -> EnableResult:
     repos = _list_cached_repos(cache_root)
@@ -442,7 +527,7 @@ def _enable_interactive(
     selected_repo = repos[repo_idx]
 
     repo_dir = cache_root / selected_repo
-    skills = _scan_skills(repo_dir, selected_repo)
+    skills = _scan_skills(repo_dir, selected_repo, include_all=include_all)
     if not skills:
         raise NotFoundError(f"No skills (directories containing SKILL.md) found in {selected_repo}")
 
@@ -472,6 +557,7 @@ def _enable_noninteractive(
     *,
     repo: str,
     name: str,
+    include_all: bool,
     url_resolver: Callable[[str], str] | None,
     emit: Callable[[str], None] | None,
 ) -> EnableResult:
@@ -489,14 +575,20 @@ def _enable_noninteractive(
     if not repo_dir.is_dir():
         raise NotFoundError(f"source repo {repo!r} is not cached")
 
-    matches = [(n, p) for n, p in _scan_skills(repo_dir, repo) if n == name]
+    matches = [
+        (n, p) for n, p in _scan_skills(repo_dir, repo, include_all=include_all) if n == name
+    ]
     if not matches:
-        raise NotFoundError(f"skill {name!r} not found in cached repo {repo!r}")
+        msg = f"skill {name!r} not found in cached repo {repo!r}"
+        if not include_all:
+            msg += _ALL_HINT
+        raise NotFoundError(msg)
     if len(matches) > 1:
         paths_list = ", ".join(p for _, p in matches)
-        raise NotFoundError(
-            f"skill {name!r} is ambiguous in {repo!r}; matching paths: {paths_list}"
-        )
+        msg = f"skill {name!r} is ambiguous in {repo!r}; matching paths: {paths_list}"
+        if not include_all:
+            msg += _ALL_HINT
+        raise NotFoundError(msg)
     _matched_name, skill_path = matches[0]
     return _enable_apply(
         project_config,
@@ -617,6 +709,7 @@ def run_available_skills(
     cache_root: Path,
     *,
     repo: str | None = None,
+    include_all: bool = False,
 ) -> AvailableSkillsResult:
     """List skills found in cached source repos (does not read project config)."""
     if repo is not None:
@@ -624,13 +717,16 @@ def run_available_skills(
         repo_dir = cache_root / repo
         if not repo_dir.is_dir():
             raise NotFoundError(f"source repo {repo!r} is not cached")
-        skills = [{"name": n, "repo": repo, "path": p} for n, p in _scan_skills(repo_dir, repo)]
+        skills = [
+            {"name": n, "repo": repo, "path": p}
+            for n, p in _scan_skills(repo_dir, repo, include_all=include_all)
+        ]
         return AvailableSkillsResult(skills=skills)
 
     skills: list[dict[str, str]] = []
     for cached_repo in _list_cached_repos(cache_root):
         repo_dir = cache_root / cached_repo
-        for n, p in _scan_skills(repo_dir, cached_repo):
+        for n, p in _scan_skills(repo_dir, cached_repo, include_all=include_all):
             skills.append({"name": n, "repo": cached_repo, "path": p})
     return AvailableSkillsResult(skills=skills)
 
@@ -702,6 +798,13 @@ def enable(
     ctx: typer.Context,
     repo: Annotated[str | None, typer.Argument(help="Source repo (owner/repo).")] = None,
     name: Annotated[str | None, typer.Argument(help="Skill name within the repo.")] = None,
+    include_all: Annotated[
+        bool,
+        typer.Option(
+            "--all",
+            help="Include hidden (dot-dir) and internal skills when discovering.",
+        ),
+    ] = False,
 ) -> None:
     """Enable a skill from a cached repo (interactive if no args)."""
     try:
@@ -724,6 +827,7 @@ def enable(
             paths.project_skills_dir(),
             repo=repo,
             name=name,
+            include_all=include_all,
             emit=emit,
         )
         if _is_json(ctx):
@@ -898,10 +1002,17 @@ def source_available_skills(
         str | None,
         typer.Argument(help="Limit scan to one cached repo (owner/repo)."),
     ] = None,
+    include_all: Annotated[
+        bool,
+        typer.Option(
+            "--all",
+            help="Include hidden (dot-dir) and internal skills.",
+        ),
+    ] = False,
 ) -> None:
     """List skills available in cached source repos (ignores project config)."""
     try:
-        result = run_available_skills(paths.repos_cache_dir(), repo=repo)
+        result = run_available_skills(paths.repos_cache_dir(), repo=repo, include_all=include_all)
         if _is_json(ctx):
             _success(ctx, result.to_data())
             return
