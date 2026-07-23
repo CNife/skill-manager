@@ -69,6 +69,16 @@ skill-manager source available-skills [repo] # list skills in the cache (no proj
 
 `sync` is idempotent and never overwrites an existing non-tool symlink (it skips with a notice). Sources are derived from the declared skills' `repo` fields.
 
+### Cold start (new source, no hand-edited JSON)
+
+```bash
+skill-manager source add <owner/repo>              # clone + register globally
+skill-manager source available-skills <owner/repo> # optional: discover skill names
+skill-manager enable <owner/repo> <name>           # declare in project + sync
+```
+
+`enable` does not clone; introduce sources with `source add` (or declare in `.skill-manager.json` and `sync`).
+
 With `--json`, success is `{"ok": true, "data": ...}` and failure is
 `{"ok": false, "error": {"code", "message"}}` (exit `0` / `1` / `2` for success /
 business error / usage error). Place `--json` before the subcommand:
