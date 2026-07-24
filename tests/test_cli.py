@@ -6,7 +6,13 @@ import pytest
 from typer.testing import CliRunner
 
 from skill_manager.cli import app, run_list, run_sync
-from skill_manager.config import SkillRef, load_global_config, load_skill_declarations
+from skill_manager.config import (
+    ConfigError,
+    SkillRef,
+    load_global_config,
+    load_skill_declarations,
+    save_global_config,
+)
 from skill_manager.links import LinkError
 
 runner = CliRunner()
@@ -244,6 +250,90 @@ def test_run_enable_duplicate(
     assert result.action == "already_enabled"
     assert result.skill["name"] == "read"
     assert result.sync is None
+
+
+def _seed_cached_source_direct(
+    tmp_path: Path, make_source_repo, skills: dict[str, str] | None = None
+) -> tuple[Path, Path, Path, Path, Path, str]:
+    """Seed global config and cache for enable tests; do not write project config."""
+    skills = skills or {"skills/read": "# read\n"}
+    upstream = make_source_repo("waza", skills)
+    url = f"file://{upstream}"
+    project = tmp_path / "proj"
+    project.mkdir()
+    cache = tmp_path / "repos"
+    gconfig = tmp_path / "config.json"
+    skills_dir = project / ".agents" / "skills"
+    cfg = load_global_config(gconfig)
+    from skill_manager.sources import ensure_source
+
+    head = ensure_source("tw93/Waza", cfg, cache, url=url)
+    save_global_config(gconfig, cfg)
+    return project, cache, gconfig, skills_dir, upstream, head
+
+
+def test_run_enable_bootstraps_missing_project_config(tmp_path: Path, make_source_repo) -> None:
+    """run_enable creates a valid project config when none exists."""
+    project, cache, gconfig, skills_dir, _upstream, _head = _seed_cached_source_direct(
+        tmp_path, make_source_repo
+    )
+    from skill_manager.cli import run_enable
+
+    result = run_enable(
+        project / ".skill-manager.json",
+        gconfig,
+        cache,
+        skills_dir,
+        repo="tw93/Waza",
+        name="read",
+        url_resolver=lambda _r: f"file://{_upstream}",
+    )
+    assert result.action == "enabled"
+    assert (project / ".skill-manager.json").is_file()
+    proj = load_skill_declarations(project / ".skill-manager.json")
+    assert proj.skills == [SkillRef("read", "tw93/Waza", "skills/read")]
+    assert (skills_dir / "read").is_symlink()
+
+
+def test_run_enable_bootstraps_empty_project_config(tmp_path: Path, make_source_repo) -> None:
+    """run_enable treats a zero-byte project config as an empty skill list."""
+    project, cache, gconfig, skills_dir, _upstream, _head = _seed_cached_source_direct(
+        tmp_path, make_source_repo
+    )
+    (project / ".skill-manager.json").write_text("", encoding="utf-8")
+    from skill_manager.cli import run_enable
+
+    result = run_enable(
+        project / ".skill-manager.json",
+        gconfig,
+        cache,
+        skills_dir,
+        repo="tw93/Waza",
+        name="read",
+        url_resolver=lambda _r: f"file://{_upstream}",
+    )
+    assert result.action == "enabled"
+    proj = load_skill_declarations(project / ".skill-manager.json")
+    assert proj.skills == [SkillRef("read", "tw93/Waza", "skills/read")]
+
+
+def test_run_enable_rejects_invalid_project_config(tmp_path: Path, make_source_repo) -> None:
+    """run_enable still surfaces malformed JSON as a config error."""
+    project, cache, gconfig, skills_dir, _upstream, _head = _seed_cached_source_direct(
+        tmp_path, make_source_repo
+    )
+    (project / ".skill-manager.json").write_text("{not json", encoding="utf-8")
+    from skill_manager.cli import run_enable
+
+    with pytest.raises(ConfigError, match="invalid JSON"):
+        run_enable(
+            project / ".skill-manager.json",
+            gconfig,
+            cache,
+            skills_dir,
+            repo="tw93/Waza",
+            name="read",
+        )
 
 
 def test_run_disable_removes_and_cleans(

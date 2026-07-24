@@ -381,6 +381,60 @@ def test_json_enable_already_enabled(
     assert (project / ".skill-manager.json").read_text() == before
 
 
+def test_json_enable_bootstraps_missing_project_config(
+    tmp_path: Path, make_source_repo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """enable --json creates a valid project config when none exists."""
+    project, head = _seed_cached_source(tmp_path, make_source_repo)
+    monkeypatch.chdir(project)
+    result = runner.invoke(app, ["--json", "enable", "tw93/Waza", "read"])
+    assert result.exit_code == 0, result.output
+    body = _parse_json(result)
+    assert body["ok"] is True
+    data = body["data"]
+    assert data["action"] == "enabled"
+    assert data["skill"] == {"name": "read", "repo": "tw93/Waza", "path": "skills/read"}
+    assert data["sync"]["sources"] == [{"repo": "tw93/Waza", "commit": head}]
+    assert data["sync"]["links"] == [{"name": "read", "action": "created"}]
+    proj = load_skill_declarations(project / ".skill-manager.json")
+    assert len(proj.skills) == 1
+    assert (project / ".agents" / "skills" / "read").is_symlink()
+
+
+def test_json_enable_bootstraps_empty_project_config(
+    tmp_path: Path, make_source_repo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """enable --json treats a zero-byte project config as an empty skill list."""
+    project, head = _seed_cached_source(tmp_path, make_source_repo)
+    (project / ".skill-manager.json").write_text("", encoding="utf-8")
+    monkeypatch.chdir(project)
+    result = runner.invoke(app, ["--json", "enable", "tw93/Waza", "read"])
+    assert result.exit_code == 0, result.output
+    body = _parse_json(result)
+    assert body["ok"] is True
+    data = body["data"]
+    assert data["action"] == "enabled"
+    assert data["skill"] == {"name": "read", "repo": "tw93/Waza", "path": "skills/read"}
+    assert data["sync"]["sources"] == [{"repo": "tw93/Waza", "commit": head}]
+    proj = load_skill_declarations(project / ".skill-manager.json")
+    assert len(proj.skills) == 1
+
+
+def test_json_enable_invalid_project_config(
+    tmp_path: Path, make_source_repo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """enable --json still surfaces malformed project JSON as a config error."""
+    project, _ = _seed_cached_source(tmp_path, make_source_repo)
+    (project / ".skill-manager.json").write_text("{not json", encoding="utf-8")
+    monkeypatch.chdir(project)
+    result = runner.invoke(app, ["--json", "enable", "tw93/Waza", "read"])
+    assert result.exit_code == 1, result.output
+    body = _parse_json(result)
+    assert body["ok"] is False
+    assert body["error"]["code"] == "config_error"
+    assert "invalid JSON" in body["error"]["message"]
+
+
 def test_json_enable_repo_not_cached(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.chdir(tmp_path)
     _write_config(tmp_path, [])
