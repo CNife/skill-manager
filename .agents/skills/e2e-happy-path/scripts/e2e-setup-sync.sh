@@ -37,7 +37,7 @@ XDG_CACHE_HOME_VAL="$E2E_ROOT/cache"
 mkdir -p "$PROJECT_DIR" "$XDG_CONFIG_HOME_VAL" "$XDG_CACHE_HOME_VAL"
 
 # 2. Declare the fixture skill. Full project-config shape is required by
-#    config.load_project_config ({"skills":[...]}), not the bare SkillRef shown
+#    config.load_skill_declarations ({"skills":[...]}), not the bare SkillRef shown
 #    in the fixture README.
 cat > "$PROJECT_DIR/.skill-manager.json" <<'EOF'
 {"skills":[{"name":"e2e-fixture","repo":"CNife/skill-manager-e2e-fixture","path":"."}]}

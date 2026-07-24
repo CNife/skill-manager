@@ -180,6 +180,59 @@ def _is_json(ctx: typer.Context) -> bool:
     return bool(ctx.obj and ctx.obj.get("json"))
 
 
+def _scope_paths(ctx: typer.Context) -> tuple[Path, Path]:
+    """Return (declaration_path, skills_dir) for the active scope.
+
+    ``--global`` targets the user's home as a project: ``~/.skill-manager.json``
+    and ``~/.agents/skills/``. The source registry and cache are shared across
+    scopes and resolved directly by each command.
+    """
+    if ctx.obj and ctx.obj.get("global"):
+        return paths.global_skills_config_path(), paths.global_skills_dir()
+    return paths.project_config_path(), paths.project_skills_dir()
+
+
+def _referencing_scopes(repo: str) -> list[str]:
+    """Scope labels whose skill declarations reference ``repo``.
+
+    Checks the project declaration (cwd) and the global declaration (``~``),
+    deduping by resolved path: when the project cwd is the user's home the two
+    files coincide and are reported once, labelled ``global``.
+    """
+    scopes: list[str] = []
+    seen: set[Path] = set()
+    global_path = paths.global_skills_config_path().resolve()
+    for path in (paths.project_config_path(), global_path):
+        resolved = path.resolve()
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        try:
+            decl = config.load_skill_declarations(path)
+        except ConfigError:
+            continue
+        if any(s.repo == repo for s in decl.skills):
+            scopes.append("global" if resolved == global_path else "project")
+    return scopes
+
+
+def _load_declarations_for_enable(path: Path) -> config.SkillDeclarations:
+    """Load declarations for ``enable``, bootstrapping only the global file.
+
+    A missing ``~/.skill-manager.json`` is treated as empty so the first
+    ``--global enable`` works without a hand-edited file. Project configs stay
+    strict: a missing ``./.skill-manager.json`` still means "not in a project".
+    When the project cwd is the user's home, the project path coincides with
+    the global path and is treated as global.
+    """
+    if path.resolve() == paths.global_skills_config_path().resolve():
+        try:
+            return config.load_skill_declarations(path)
+        except ConfigError:
+            return config.SkillDeclarations(skills=[])
+    return config.load_skill_declarations(path)
+
+
 def _emit_json(payload: dict[str, Any]) -> None:
     typer.echo(json.dumps(payload, ensure_ascii=False))
 
@@ -245,10 +298,18 @@ def _root(
             help="Emit a single JSON object on stdout (implies non-interactive).",
         ),
     ] = False,
+    global_scope: Annotated[
+        bool,
+        typer.Option(
+            "--global",
+            help="Operate on user-global skills (~/.skill-manager.json, ~/.agents/skills/).",
+        ),
+    ] = False,
 ) -> None:
     """Project-scoped declarative skill manager for agent skills."""
     ctx.ensure_object(dict)
     ctx.obj["json"] = json_mode
+    ctx.obj["global"] = global_scope
 
 
 # ── domain runners ────────────────────────────────────────────────────────────
@@ -272,7 +333,7 @@ def run_sync(
     Always returns a ``SyncResult`` for structured consumers.
     """
     resolver = url_resolver or sources.repo_url
-    proj = config.load_project_config(project_config)
+    proj = config.load_skill_declarations(project_config)
     repos = config.derived_sources(proj)
     global_cfg = config.load_global_config(global_config_path)
     result = SyncResult()
@@ -312,7 +373,7 @@ def run_list(
     skills_dir: Path,
 ) -> ListResult:
     """Collect declared skills with link status (and human-only source rows)."""
-    proj = config.load_project_config(project_config)
+    proj = config.load_skill_declarations(project_config)
     global_cfg = config.load_global_config(global_config_path)
     source_rows: list[tuple[str, str, str]] = []
     for repo in config.derived_sources(proj):
@@ -561,7 +622,7 @@ def _enable_noninteractive(
     url_resolver: Callable[[str], str] | None,
     emit: Callable[[str], None] | None,
 ) -> EnableResult:
-    proj = config.load_project_config(project_config)
+    proj = _load_declarations_for_enable(project_config)
     existing = next((s for s in proj.skills if s.name == name), None)
     if existing is not None:
         # Idempotent early return: no sync, no cache validation.
@@ -614,7 +675,7 @@ def _enable_apply(
     url_resolver: Callable[[str], str] | None,
     emit: Callable[[str], None] | None,
 ) -> EnableResult:
-    proj = config.load_project_config(project_config)
+    proj = _load_declarations_for_enable(project_config)
     existing = next((s for s in proj.skills if s.name == name), None)
     if existing is not None:
         _emit(emit, f"Skill {name!r} already enabled")
@@ -624,7 +685,7 @@ def _enable_apply(
         )
 
     proj.skills.append(SkillRef(name=name, repo=repo, path=skill_path))
-    config.save_project_config(project_config, proj)
+    config.save_skill_declarations(project_config, proj)
     _emit(emit, f"Added {name} ({repo}:{skill_path}) to {project_config}")
 
     sync_result = run_sync(
@@ -652,7 +713,7 @@ def run_disable(
     emit: Callable[[str], None] | None = None,
 ) -> DisableResult:
     """Disable a skill interactively (name is None) or non-interactively."""
-    proj = config.load_project_config(project_config)
+    proj = config.load_skill_declarations(project_config)
 
     if name is None:
         if not proj.skills:
@@ -680,9 +741,9 @@ def _disable_apply(
     *,
     emit: Callable[[str], None] | None,
 ) -> DisableResult:
-    proj = config.load_project_config(project_config)
+    proj = config.load_skill_declarations(project_config)
     proj.skills = [s for s in proj.skills if s.name != skill.name]
-    config.save_project_config(project_config, proj)
+    config.save_skill_declarations(project_config, proj)
     _emit(emit, f"Removed {skill.name} from {project_config}")
 
     link = skills_dir / skill.name
@@ -735,14 +796,15 @@ def run_available_skills(
 
 @app.command()
 def sync(ctx: typer.Context) -> None:
-    """Sync declared skills into ./.agents/skills/."""
+    """Sync declared skills into the scope's .agents/skills/ dir."""
     try:
         emit = None if _is_json(ctx) else typer.echo
+        decl_path, skills_dir = _scope_paths(ctx)
         result = run_sync(
-            paths.project_config_path(),
+            decl_path,
             paths.config_file(),
             paths.repos_cache_dir(),
-            paths.project_skills_dir(),
+            skills_dir,
             emit=emit,
         )
         _success(ctx, result.to_data())
@@ -754,11 +816,12 @@ def sync(ctx: typer.Context) -> None:
 def list_(ctx: typer.Context) -> None:
     """List declared sources and skills with status."""
     try:
+        decl_path, skills_dir = _scope_paths(ctx)
         result = run_list(
-            paths.project_config_path(),
+            decl_path,
             paths.config_file(),
             paths.repos_cache_dir(),
-            paths.project_skills_dir(),
+            skills_dir,
         )
         if _is_json(ctx):
             _success(
@@ -819,11 +882,12 @@ def enable(
         # Interactive path still needs menus on stdout even when emit is typer.echo;
         # pass emit only for structured progress in non-json mode. For interactive
         # selection, run_enable uses typer.echo/input directly for menus.
+        decl_path, skills_dir = _scope_paths(ctx)
         result = run_enable(
-            paths.project_config_path(),
+            decl_path,
             paths.config_file(),
             paths.repos_cache_dir(),
-            paths.project_skills_dir(),
+            skills_dir,
             repo=repo,
             name=name,
             include_all=include_all,
@@ -848,11 +912,12 @@ def disable(
                 "disable requires NAME in --json mode (non-interactive)"
             )
         emit = None if _is_json(ctx) else typer.echo
+        decl_path, skills_dir = _scope_paths(ctx)
         result = run_disable(
-            paths.project_config_path(),
+            decl_path,
             paths.config_file(),
             paths.repos_cache_dir(),
-            paths.project_skills_dir(),
+            skills_dir,
             name=name,
             emit=emit,
         )
@@ -934,17 +999,11 @@ def source_remove(ctx: typer.Context, repo: str) -> None:
         cache_root = paths.repos_cache_dir()
         if repo not in global_cfg.sources:
             raise NotFoundError(f"source {repo!r} not found")
-        try:
-            proj_cfg = config.load_project_config(paths.project_config_path())
-        except ConfigError:
-            proj_cfg = None  # not in a project dir, skip warning
-        if (
-            not _is_json(ctx)
-            and proj_cfg is not None
-            and any(s.repo == repo for s in proj_cfg.skills)
-        ):
+        referenced_scopes = _referencing_scopes(repo)
+        if referenced_scopes and not _is_json(ctx):
             typer.echo(
-                f"warning: project skills still reference {repo!r}, skills may break",
+                f"warning: {repo!r} still referenced by {', '.join(referenced_scopes)} "
+                "skills, links may break",
                 err=True,
             )
         sources.remove_source(repo, global_cfg, cache_root)

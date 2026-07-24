@@ -10,7 +10,7 @@ import pytest
 from typer.testing import CliRunner
 
 from skill_manager.cli import app
-from skill_manager.config import load_project_config
+from skill_manager.config import load_skill_declarations
 
 runner = CliRunner()
 
@@ -273,7 +273,7 @@ def test_json_enable_all_resolves_filtered_skill(
         "path": ".archive/old",
     }
     assert body["data"]["sync"]["sources"] == [{"repo": "tw93/Waza", "commit": head}]
-    proj = load_project_config(project / ".skill-manager.json")
+    proj = load_skill_declarations(project / ".skill-manager.json")
     assert len(proj.skills) == 1
     assert proj.skills[0].path == ".archive/old"
     assert (project / ".agents" / "skills" / "old").is_symlink()
@@ -382,7 +382,7 @@ def test_enable_interactive_all_menu_includes_archive(
     monkeypatch.setattr("builtins.input", lambda prompt="": next(answers))
     result = runner.invoke(app, ["enable", "--all"])
     assert result.exit_code == 0, result.output
-    proj = load_project_config(project / ".skill-manager.json")
+    proj = load_skill_declarations(project / ".skill-manager.json")
     assert any(s.name == "old" and s.path == ".archive/old" for s in proj.skills)
 
 

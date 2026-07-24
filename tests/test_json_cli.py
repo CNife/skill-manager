@@ -10,7 +10,7 @@ import pytest
 from typer.testing import CliRunner
 
 from skill_manager.cli import app, run_sync
-from skill_manager.config import load_project_config
+from skill_manager.config import load_skill_declarations
 
 runner = CliRunner()
 
@@ -356,7 +356,7 @@ def test_json_enable_success(
     assert data["skill"] == {"name": "read", "repo": "tw93/Waza", "path": "skills/read"}
     assert data["sync"]["sources"] == [{"repo": "tw93/Waza", "commit": head}]
     assert data["sync"]["links"] == [{"name": "read", "action": "created"}]
-    proj = load_project_config(project / ".skill-manager.json")
+    proj = load_skill_declarations(project / ".skill-manager.json")
     assert len(proj.skills) == 1
     assert (project / ".agents" / "skills" / "read").is_symlink()
 
@@ -474,7 +474,7 @@ def test_json_disable_success(
         "path": "skills/read",
     }
     assert body["data"]["link_removed"] is True
-    proj = load_project_config(project / ".skill-manager.json")
+    proj = load_skill_declarations(project / ".skill-manager.json")
     assert proj.skills == []
     assert not (project / ".agents" / "skills" / "read").exists()
 

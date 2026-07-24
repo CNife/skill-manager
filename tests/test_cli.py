@@ -6,7 +6,7 @@ import pytest
 from typer.testing import CliRunner
 
 from skill_manager.cli import app, run_list, run_sync
-from skill_manager.config import SkillRef, load_global_config, load_project_config
+from skill_manager.config import SkillRef, load_global_config, load_skill_declarations
 from skill_manager.links import LinkError
 
 runner = CliRunner()
@@ -224,7 +224,7 @@ def test_run_enable_adds_and_syncs(
     monkeypatch.setattr("builtins.input", lambda prompt="": next(iter(["1", "1"])))
     run_enable(project / ".skill-manager.json", gconfig, cache, skills_dir)
 
-    proj = load_project_config(project / ".skill-manager.json")
+    proj = load_skill_declarations(project / ".skill-manager.json")
     assert len(proj.skills) == 1
     assert proj.skills[0] == SkillRef("read", "tw93/Waza", "skills/read")
     assert (skills_dir / "read").is_symlink()
@@ -272,9 +272,9 @@ def test_run_disable_removes_and_cleans(
     run_disable(project / ".skill-manager.json", gconfig, cache, skills_dir)
 
     # Verify config entry removed
-    from skill_manager.config import load_project_config
+    from skill_manager.config import load_skill_declarations
 
-    proj = load_project_config(project / ".skill-manager.json")
+    proj = load_skill_declarations(project / ".skill-manager.json")
     assert len(proj.skills) == 0
     # Verify symlink removed
     assert not (skills_dir / "read").exists()

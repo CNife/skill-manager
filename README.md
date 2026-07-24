@@ -6,7 +6,7 @@ Project-scoped declarative skill manager for coding agents that load skills from
 
 Compatible with any agent that discovers skill directories containing `SKILL.md` under those paths ([pi](https://github.com/earendil-works/pi-coding-agent) is one example).
 
-Today skill-manager only writes project Links under `./.agents/skills/`. Managing `~/.agents/skills/` is on the [roadmap](#roadmap).
+Project Links live under `./.agents/skills/`; user-global Links under `~/.agents/skills/` are managed with the same model via `--global` (see [Global skills](#global-skills)).
 
 ## Features
 
@@ -14,6 +14,7 @@ Today skill-manager only writes project Links under `./.agents/skills/`. Managin
 - **Inspect source and link status** — `skill-manager list` (`linked` / `external` / `broken` / `unlinked`)
 - **Enable / disable** — interactive menus, or non-interactive `enable <repo> <name>` / `disable <name>`
 - **Manage source cache** — `skill-manager source list|add|remove|update|available-skills`
+- **Global skills** - `--global` flag applies any command to user-global skills (`~/.skill-manager.json`, `~/.agents/skills/`)
 - **Scripting / CI** — root `--json` on every command (`skill-manager --json <cmd> ...`)
 
 ## Install
@@ -57,6 +58,20 @@ skill-manager disable                  # interactive: pick an enabled skill
 skill-manager disable <name>           # non-interactive disable
 skill-manager --json sync              # single JSON object on stdout (all commands)
 ```
+
+### Global skills
+
+Add `--global` to any of `sync` / `list` / `enable` / `disable` to target user-global skills instead of the project. The user's home is treated as a project: declarations live in `~/.skill-manager.json` and links land in `~/.agents/skills/`. Sources and the cache are shared across scopes.
+
+```bash
+skill-manager --global sync                  # link globally-declared skills into ~/.agents/skills/
+skill-manager --global list                  # show global skills status
+skill-manager --global enable <repo> <name>  # declare globally + sync
+skill-manager --global disable <name>        # remove a global declaration + link
+skill-manager --json --global list           # JSON output composes with --global
+```
+
+Running `skill-manager` from `~` without `--global` targets `~/.skill-manager.json` too (home *is* the global project) — intentional, not a collision.
 
 ### Source repository management
 
@@ -103,6 +118,8 @@ business error / usage error). Place `--json` before the subcommand:
 | Global config | `$XDG_CONFIG_HOME/skill-manager/config.json` (default `~/.config/skill-manager/config.json`) |
 | Source cache | `$XDG_CACHE_HOME/skill-manager/repos/` (default `~/.cache/skill-manager/repos/`) |
 | Project skills | `./.agents/skills/` |
+| Global skills declaration | `~/.skill-manager.json` |
+| Global skills | `~/.agents/skills/` |
 
 ## Roadmap
 
@@ -121,4 +138,4 @@ A Source shouldn't be locked to `owner/repo` on GitHub. Arbitrary Git URLs and l
 
 ### One model, project and global
 
-Project Links and user-global Links (`~/.agents/skills/`) should share one declaration-and-sync model: keep globals slim, declare per project what you actually need.
+Project Links and user-global Links (`~/.agents/skills/`) share one declaration-and-sync model via the `--global` flag: keep globals slim, declare per project what you actually need.
