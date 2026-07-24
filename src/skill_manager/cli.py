@@ -217,19 +217,19 @@ def _referencing_scopes(repo: str) -> list[str]:
 
 
 def _load_declarations_for_enable(path: Path) -> config.SkillDeclarations:
-    """Load declarations for ``enable``, bootstrapping only the global file.
+    """Load declarations for ``enable``, bootstrapping missing/empty files.
 
-    A missing ``~/.skill-manager.json`` is treated as empty so the first
-    ``--global enable`` works without a hand-edited file. Project configs stay
-    strict: a missing ``./.skill-manager.json`` still means "not in a project".
-    When the project cwd is the user's home, the project path coincides with
-    the global path and is treated as global.
+    ``enable`` is the command that introduces skills into a scope, so a
+    missing or zero-byte declaration file is treated as an empty config rather
+    than an error. Global and project scopes behave the same here; when the
+    project cwd is the user's home the two paths coincide and are handled once.
+    Malformed JSON is still reported as a config error.
     """
-    if path.resolve() == paths.global_skills_config_path().resolve():
-        try:
-            return config.load_skill_declarations(path)
-        except ConfigError:
-            return config.SkillDeclarations(skills=[])
+    if not path.is_file():
+        return config.SkillDeclarations(skills=[])
+    text = path.read_text(encoding="utf-8").strip()
+    if not text:
+        return config.SkillDeclarations(skills=[])
     return config.load_skill_declarations(path)
 
 
