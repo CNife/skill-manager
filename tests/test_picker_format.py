@@ -1,3 +1,4 @@
+# ruff: noqa: RUF001
 """Pure display helpers for picker inline descriptions."""
 
 from __future__ import annotations
@@ -33,3 +34,66 @@ def test_truncate_description_fullwidth_aware() -> None:
 def test_truncate_description_avail_lt_2_is_empty() -> None:
     assert truncate_description("hello", 1) == ""
     assert truncate_description("hello", 0) == ""
+
+
+def test_inline_control_constructs_when_all_choices_locked() -> None:
+    """All-locked enable lists must open (spec: locked rows stay highlightable).
+
+    questionary's InquirerControl leaves ``pointed_at`` unset when every Choice
+    is disabled; our control must still construct and point at the first row.
+    """
+    from questionary import Choice
+
+    from skill_manager.picker import _make_inline_control
+
+    control_cls = _make_inline_control()
+    ic = control_cls(
+        [
+            Choice(
+                title="alpha",
+                value="alpha",
+                disabled="already enabled",
+                checked=True,
+                description="First",
+            ),
+            Choice(
+                title="bravo",
+                value="bravo",
+                disabled="already enabled",
+                checked=True,
+                description="Second",
+            ),
+        ],
+        pointer="❯",
+        use_indicator=True,
+        use_shortcuts=False,
+        show_description=True,
+        show_selected=False,
+    )
+    assert ic.pointed_at == 0
+    tokens = ic._get_choice_tokens()
+    assert any("alpha" in (t[1] if isinstance(t, tuple) else "") for t in tokens)
+
+
+def test_qa_checkbox_builds_question_when_all_locked() -> None:
+    """Checkbox prompt construction must not crash on an all-locked skill list."""
+    from questionary import Choice
+
+    from skill_manager.picker import _q_style, _qa_checkbox
+
+    q = _qa_checkbox(
+        "Enable skills",
+        [
+            Choice(
+                title="only",
+                value="only",
+                disabled="already enabled",
+                checked=True,
+                description="Already on",
+            ),
+        ],
+        instruction="(type · ↑↓ · space · enter · Esc/Ctrl-C) ",
+        style=_q_style(),
+        show_description=True,
+    )
+    assert q is not None

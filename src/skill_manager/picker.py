@@ -152,6 +152,25 @@ def _make_inline_control():
     from questionary.prompts.common import Choice, InquirerControl, Separator
 
     class InlineDescControl(InquirerControl):
+        def _init_choices(self, choices, pointed_at):
+            super()._init_choices(choices, pointed_at)
+            # questionary only assigns pointed_at when it finds a non-disabled
+            # choice. All-locked enable lists are valid UI (rows stay
+            # highlightable; Enter = empty submit) — default to the first row.
+            if not hasattr(self, "pointed_at") and self.choices:
+                self.pointed_at = 0
+
+        def __init__(self, choices, **kwargs):
+            try:
+                super().__init__(choices, **kwargs)
+            except ValueError:
+                # Parent rejects a pointer that lands on disabled; accept when
+                # every real choice is disabled (locked-only list).
+                if not getattr(self, "choices", None) or not hasattr(self, "pointed_at"):
+                    raise
+                if any(not isinstance(c, Separator) and not c.disabled for c in self.choices):
+                    raise
+
         def _get_choice_tokens(self):
             tokens: list = []
             term_cols = shutil.get_terminal_size(fallback=(80, 24)).columns
