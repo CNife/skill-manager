@@ -15,6 +15,7 @@ import subprocess
 from pathlib import Path
 
 import pytest
+from helpers import skill_md
 from typer.testing import CliRunner
 
 from skill_manager.cli import app, run_sync
@@ -28,9 +29,9 @@ from skill_manager.config import (
 runner = CliRunner()
 
 SKILLS = {
-    "skills/read": "# read\n",
-    "skills/write": "# write\n",
-    "skills/kami": "# kami\n",
+    "skills/read": skill_md("read"),
+    "skills/write": skill_md("write"),
+    "skills/kami": skill_md("kami"),
 }
 
 
@@ -381,67 +382,30 @@ def test_json_disable_not_enabled_results_shape(tmp_path: Path, monkeypatch) -> 
     assert data == {"results": [{"action": "not_enabled", "skill": {"name": "read"}}]}
 
 
-# ── interactive multi-select ──────────────────────────────────────────────────
+# ── interactive CLI guards (no TTY / no numbered menus) ───────────────────────
 
 
-def test_interactive_enable_multi_select(tmp_path: Path, make_source_repo, monkeypatch) -> None:
+def test_cli_interactive_enable_requires_tty(tmp_path: Path, make_source_repo, monkeypatch) -> None:
     project = _seed_cli(tmp_path, make_source_repo)
     _write_config(project, [])
     monkeypatch.chdir(project)
-    # Menu order is alphabetical: 1=kami, 2=read, 3=write. Select read+write.
-    result = runner.invoke(app, ["enable"], input="1\n2 3\n")
-    assert result.exit_code == 0, result.output
-    proj = load_skill_declarations(project / ".skill-manager.json")
-    assert {s.name for s in proj.skills} == {"read", "write"}
-
-
-def test_interactive_disable_multi_select(tmp_path: Path, make_source_repo, monkeypatch) -> None:
-    project = _seed_cli(tmp_path, make_source_repo)
-    _write_config(
-        project,
-        [
-            {"name": "read", "repo": "tw93/Waza", "path": "skills/read"},
-            {"name": "write", "repo": "tw93/Waza", "path": "skills/write"},
-        ],
-    )
-    monkeypatch.chdir(project)
-    runner.invoke(app, ["sync"])
-    result = runner.invoke(app, ["disable"], input="1 2\n")
-    assert result.exit_code == 0, result.output
+    # CliRunner is non-TTY; interactive enable must fail clearly, not hang.
+    result = runner.invoke(app, ["enable"])
+    assert result.exit_code == 1, result.output
+    assert "TTY" in result.output
     assert load_skill_declarations(project / ".skill-manager.json").skills == []
 
 
-def test_interactive_multi_select_comma(tmp_path: Path, make_source_repo, monkeypatch) -> None:
-    project = _seed_cli(tmp_path, make_source_repo)
-    _write_config(project, [])
-    monkeypatch.chdir(project)
-    result = runner.invoke(app, ["enable"], input="1\n2,3\n")
-    assert result.exit_code == 0, result.output
-    proj = load_skill_declarations(project / ".skill-manager.json")
-    assert {s.name for s in proj.skills} == {"read", "write"}
-
-
-def test_interactive_multi_select_dedupe_ascending(
+def test_cli_interactive_disable_requires_tty(
     tmp_path: Path, make_source_repo, monkeypatch
 ) -> None:
     project = _seed_cli(tmp_path, make_source_repo)
-    _write_config(project, [])
+    _write_config(
+        project,
+        [{"name": "read", "repo": "tw93/Waza", "path": "skills/read"}],
+    )
     monkeypatch.chdir(project)
-    # "3 2 3" -> deduped, ascending -> read(2), write(3)
-    result = runner.invoke(app, ["enable"], input="1\n3 2 3\n")
-    assert result.exit_code == 0, result.output
-    proj = load_skill_declarations(project / ".skill-manager.json")
-    assert [s.name for s in proj.skills] == ["read", "write"]
-
-
-def test_interactive_multi_select_invalid_reprompt(
-    tmp_path: Path, make_source_repo, monkeypatch
-) -> None:
-    project = _seed_cli(tmp_path, make_source_repo)
-    _write_config(project, [])
-    monkeypatch.chdir(project)
-    # repo 1; skill prompt: "99" invalid -> re-prompt -> "2" (read)
-    result = runner.invoke(app, ["enable"], input="1\n99\n2\n")
-    assert result.exit_code == 0, result.output
-    proj = load_skill_declarations(project / ".skill-manager.json")
-    assert [s.name for s in proj.skills] == ["read"]
+    result = runner.invoke(app, ["disable"])
+    assert result.exit_code == 1, result.output
+    assert "TTY" in result.output
+    assert len(load_skill_declarations(project / ".skill-manager.json").skills) == 1

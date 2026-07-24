@@ -7,7 +7,6 @@ console_scripts target.
 from __future__ import annotations
 
 import json
-import re
 import sys
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -21,6 +20,14 @@ from typer.core import TyperGroup
 from skill_manager import __version__, config, links, paths, sources
 from skill_manager.config import ConfigError, SkillRef
 from skill_manager.links import LinkError
+from skill_manager.picker import (
+    Picker,
+    PickerCancelled,
+    QuestionaryPicker,
+    SkillChoice,
+    SourceChoice,
+    stdin_stdout_are_tty,
+)
 from skill_manager.sources import SourceError
 
 # ── result types ──────────────────────────────────────────────────────────────
@@ -125,6 +132,15 @@ class NotFoundError(Exception):
 
 class UsageError(Exception):
     """CLI usage error (missing/partial args)."""
+
+
+@dataclass(frozen=True)
+class ScannedSkill:
+    """A qualified skill discovered under a cached Source."""
+
+    name: str
+    path: str
+    description: str
 
 
 # ── JSON-aware Typer group (usage errors become JSON when --json is set) ──────
@@ -430,26 +446,42 @@ _SKIP_DIR_NAMES = frozenset({"node_modules", "dist", "build", "__pycache__"})
 _ALL_HINT = " (hint: use --all to include hidden or internal skills)"
 
 
-def _is_internal_skill(skill_md: Path) -> bool:
-    """True only when SKILL.md frontmatter has metadata.internal as YAML bool true."""
-    try:
-        text = skill_md.read_text(encoding="utf-8")
-    except OSError:
-        return False
-    if not text.startswith("---"):
-        return False
-    # Frontmatter ends at the next line that is exactly ---
+def _frontmatter_lines(text: str) -> list[str] | None:
+    """Return YAML frontmatter body lines, or None if missing/unclosed."""
     lines = text.splitlines()
     if not lines or lines[0].strip() != "---":
-        return False
+        return None
     end_idx = None
     for i in range(1, len(lines)):
         if lines[i].strip() == "---":
             end_idx = i
             break
     if end_idx is None:
-        return False
-    return _metadata_internal_is_true(lines[1:end_idx])
+        return None
+    return lines[1:end_idx]
+
+
+def _top_level_string_fields(fm_lines: list[str]) -> dict[str, str]:
+    """Extract top-level simple ``key: value`` string scalars from FM lines."""
+    fields: dict[str, str] = {}
+    for raw in fm_lines:
+        if not raw.strip() or raw.lstrip().startswith("#"):
+            continue
+        # Only spaces count as YAML indentation here.
+        indent = len(raw) - len(raw.lstrip(" "))
+        if indent > 0:
+            continue
+        if ":" not in raw:
+            continue
+        key, _, val = raw.partition(":")
+        key = key.strip()
+        if not key:
+            continue
+        val = val.strip()
+        if len(val) >= 2 and val[0] == val[-1] and val[0] in "\"'":
+            val = val[1:-1]
+        fields[key] = val
+    return fields
 
 
 def _metadata_internal_is_true(fm_lines: list[str]) -> bool:
@@ -481,26 +513,49 @@ def _metadata_internal_is_true(fm_lines: list[str]) -> bool:
     return False
 
 
-def _scan_skills(repo_dir: Path, repo: str, *, include_all: bool = False) -> list[tuple[str, str]]:
-    """Discover skills under a cached Source checkout.
+def _qualify_skill(skill_md: Path) -> tuple[str, str, bool] | None:
+    """Return ``(name, description, is_internal)`` if qualified, else None.
+
+    Qualification: UTF-8 decodable SKILL.md with YAML frontmatter containing
+    non-empty string ``name`` and ``description``. Discovery name is FM ``name``.
+    ``is_internal`` reflects metadata.internal YAML bool true.
+    """
+    try:
+        text = skill_md.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return None
+    fm_lines = _frontmatter_lines(text)
+    if fm_lines is None:
+        return None
+    fields = _top_level_string_fields(fm_lines)
+    name = fields.get("name", "").strip()
+    description = fields.get("description", "").strip()
+    if not name or not description:
+        return None
+    return name, description, _metadata_internal_is_true(fm_lines)
+
+
+def _scan_skills(repo_dir: Path, repo: str, *, include_all: bool = False) -> list[ScannedSkill]:
+    """Discover qualified skills under a cached Source checkout.
 
     Default (include_all=False): skip noise dir names, dot-directories, and
     skills with metadata.internal: true. Always stop recursion at a skill root
-    (directory containing SKILL.md). Returns list of (name, path) tuples.
+    (directory containing SKILL.md). Qualification (UTF-8 + FM name/description)
+    always applies; ``--all`` only widens noise/internal filters.
     """
-    skills: list[tuple[str, str]] = []
+    del repo  # discovery name comes from FM, not the repo id
+    skills: list[ScannedSkill] = []
 
     def visit(current: Path) -> None:
         skill_md = current / "SKILL.md"
         if skill_md.is_file():
-            if include_all or not _is_internal_skill(skill_md):
-                if current == repo_dir:
-                    name = Path(repo).name.lower()
-                    rel = "."
-                else:
-                    name = current.name
-                    rel = str(current.relative_to(repo_dir))
-                skills.append((name, rel))
+            qualified = _qualify_skill(skill_md)
+            if qualified is not None:
+                name, description, is_internal = qualified
+                if not include_all and is_internal:
+                    return  # skill-root truncation still applies
+                rel = "." if current == repo_dir else str(current.relative_to(repo_dir))
+                skills.append(ScannedSkill(name=name, path=rel, description=description))
             return  # skill-root truncation (always)
 
         try:
@@ -518,66 +573,6 @@ def _scan_skills(repo_dir: Path, repo: str, *, include_all: bool = False) -> lis
     return skills
 
 
-def _numbered_select(items: list[str], prompt: str) -> int:
-    """Display a numbered menu and return the selected index."""
-    for i, item in enumerate(items, 1):
-        typer.echo(f"  {i:>3}. {item}")
-    while True:
-        try:
-            raw = input(f"{prompt} ")
-            idx = int(raw.strip()) - 1
-            if 0 <= idx < len(items):
-                return idx
-            typer.echo(f"Please enter a number between 1 and {len(items)}", err=True)
-        except (ValueError, EOFError):
-            typer.echo("Invalid input", err=True)
-        except KeyboardInterrupt:
-            raise typer.Exit(code=1) from None
-
-
-def _numbered_multi_select(items: list[str], prompt: str) -> list[int]:
-    """Display a numbered menu; return selected indices (ascending, deduped).
-
-    Accepts one or more 1-based numbers separated by spaces and/or commas
-    (e.g. ``1 3 5`` or ``1,3``). Re-prompts until every token is a valid in-range
-    number, reporting the offending token. A single number selects one item.
-    """
-    for i, item in enumerate(items, 1):
-        typer.echo(f"  {i:>3}. {item}")
-    while True:
-        try:
-            raw = input(f"{prompt} ")
-        except EOFError:
-            typer.echo("Invalid input", err=True)
-            continue
-        except KeyboardInterrupt:
-            raise typer.Exit(code=1) from None
-        tokens = [t for t in re.split(r"[,\s]+", raw.strip()) if t]
-        if not tokens:
-            typer.echo("Invalid input", err=True)
-            continue
-        idxs: set[int] = set()
-        bad: str | None = None
-        for tok in tokens:
-            try:
-                num = int(tok)
-            except ValueError:
-                bad = tok
-                break
-            if not 1 <= num <= len(items):
-                bad = tok
-                break
-            idxs.add(num - 1)
-        if bad is not None:
-            typer.echo(
-                f"Invalid choice: {bad!r} (enter numbers between 1 and {len(items)}, "
-                "separated by spaces)",
-                err=True,
-            )
-            continue
-        return sorted(idxs)
-
-
 def run_enable(
     project_config: Path,
     global_config_path: Path,
@@ -589,6 +584,7 @@ def run_enable(
     include_all: bool = False,
     url_resolver: Callable[[str], str] | None = None,
     emit: Callable[[str], None] | None = None,
+    picker: Picker | None = None,
 ) -> EnableResult:
     """Enable one or more skills interactively or non-interactively.
 
@@ -596,6 +592,9 @@ def run_enable(
     Interactive when both are omitted. ``repo`` without names is a usage error.
     ``include_all`` widens Source skill discovery (hidden / internal). The batch
     is atomic: if any requested name is invalid, nothing is applied.
+
+    ``picker`` is the interactive adapter (default: questionary UI). Tests inject
+    a fake. Cancel raises ``PickerCancelled``.
     """
     names = list(names or [])
     if repo is None and not names:
@@ -607,6 +606,7 @@ def run_enable(
             include_all=include_all,
             url_resolver=url_resolver,
             emit=emit,
+            picker=picker,
         )
     if repo is None or not names:
         raise click.exceptions.UsageError(
@@ -631,6 +631,23 @@ def _emit(emit: Callable[[str], None] | None, message: str) -> None:
         emit(message)
 
 
+def _require_interactive_tty(*, command: str) -> None:
+    """Fail interactive path when stdin/stdout are not TTYs (exit 1)."""
+    if not stdin_stdout_are_tty():
+        if command == "enable":
+            msg = "interactive enable requires a TTY; pass REPO and NAME(s), or run in a terminal."
+        else:
+            msg = "interactive disable requires a TTY; pass NAME(s), or run in a terminal."
+        raise NotFoundError(msg)
+
+
+def _resolve_picker(picker: Picker | None, *, command: str) -> Picker:
+    if picker is not None:
+        return picker
+    _require_interactive_tty(command=command)
+    return QuestionaryPicker()
+
+
 def _enable_interactive(
     project_config: Path,
     global_config_path: Path,
@@ -640,37 +657,65 @@ def _enable_interactive(
     include_all: bool,
     url_resolver: Callable[[str], str] | None,
     emit: Callable[[str], None] | None,
+    picker: Picker | None,
 ) -> EnableResult:
+    # Guard TTY before any cache scan (injected picker skips the check).
+    ui = _resolve_picker(picker, command="enable")
+
     repos = _list_cached_repos(cache_root)
     if not repos:
         raise NotFoundError(
             "No cached repos found. Run 'skill-manager sync' first to populate the cache."
         )
 
-    typer.echo("\nCached repos:")
-    repo_idx = _numbered_select(repos, "Select repo (number):")
-    selected_repo = repos[repo_idx]
+    # Build source choices with qualified skill counts (0-skill sources listed).
+    source_choices: list[SourceChoice] = []
+    skills_by_repo: dict[str, list[ScannedSkill]] = {}
+    for r in repos:
+        scanned = _scan_skills(cache_root / r, r, include_all=include_all)
+        skills_by_repo[r] = scanned
+        source_choices.append(SourceChoice(repo=r, skill_count=len(scanned)))
 
-    repo_dir = cache_root / selected_repo
-    skills = _scan_skills(repo_dir, selected_repo, include_all=include_all)
+    selected_repo = ui.select_source(source_choices)
+    skills = skills_by_repo.get(selected_repo)
+    if skills is None:
+        # Defensive: picker returned an unknown repo.
+        raise NotFoundError(f"source repo {selected_repo!r} is not cached")
     if not skills:
-        raise NotFoundError(f"No skills (directories containing SKILL.md) found in {selected_repo}")
+        raise NotFoundError(f"No qualified skills found in {selected_repo}")
 
-    typer.echo(f"\nSkills in {selected_repo}:")
-    skill_labels = [f"{n}  ({p})" for n, p in skills]
-    selected_idxs = _numbered_multi_select(
-        skill_labels, "Select skills (numbers, space-separated):"
-    )
-    # Dedupe by skill name (a menu may list same-named skills at different
-    # paths); keep the first selected occurrence in ascending menu order.
+    proj = _load_declarations_for_enable(project_config)
+    locked = {s.name for s in proj.skills}
+    skill_choices = [
+        SkillChoice(
+            name=s.name,
+            path=s.path,
+            description=s.description,
+            locked=s.name in locked,
+        )
+        for s in skills
+    ]
+    selected_names = ui.select_skills_to_enable(skill_choices)
+
+    # Map selected names to first matching path in scan order; skip locked;
+    # dedupe by name keeping first-in-list order.
+    path_by_name: dict[str, str] = {}
+    for s in skills:
+        path_by_name.setdefault(s.name, s.path)
+
     resolved: list[tuple[str, str]] = []
     seen: set[str] = set()
-    for idx in selected_idxs:
-        skill_name, skill_path = skills[idx]
-        if skill_name in seen:
+    for name in selected_names:
+        if name in locked or name in seen:
             continue
-        seen.add(skill_name)
-        resolved.append((skill_name, skill_path))
+        if name not in path_by_name:
+            continue
+        seen.add(name)
+        resolved.append((name, path_by_name[name]))
+
+    if not resolved:
+        _emit(emit, "Nothing to enable.")
+        return EnableResult(outcomes=[], sync=None)
 
     return _enable_apply_batch(
         project_config,
@@ -713,17 +758,17 @@ def _enable_noninteractive(
             raise NotFoundError(f"source repo {repo!r} is not cached")
         available = _scan_skills(repo_dir, repo, include_all=include_all)
         for skill_name in needs_resolution:
-            matches = [(n, p) for n, p in available if n == skill_name]
+            matches = [s for s in available if s.name == skill_name]
             if not matches:
                 has_not_found = True
                 failures.append(f"skill {skill_name!r} not found in cached repo {repo!r}")
             elif len(matches) > 1:
-                paths_list = ", ".join(p for _, p in matches)
+                paths_list = ", ".join(s.path for s in matches)
                 failures.append(
                     f"skill {skill_name!r} is ambiguous in {repo!r}; matching paths: {paths_list}"
                 )
             else:
-                resolved_paths[skill_name] = matches[0][1]
+                resolved_paths[skill_name] = matches[0].path
         if failures:
             msg = "; ".join(failures)
             if has_not_found and not include_all:
@@ -808,30 +853,31 @@ def run_disable(
     *,
     names: list[str] | None = None,
     emit: Callable[[str], None] | None = None,
+    picker: Picker | None = None,
 ) -> DisableResult:
     """Disable one or more skills (interactive when ``names`` is empty).
 
     Lenient: disabling a name that is not enabled is an idempotent no-op
     reported per name, never an error. Declarations are removed and the config
     saved once for the whole batch.
+
+    ``picker`` is the interactive adapter (default: questionary UI). Cancel
+    raises ``PickerCancelled``.
     """
+    del global_config_path  # shared signature with other runners; unused here
     names = list(names or [])
     proj = config.load_skill_declarations(project_config)
 
     if not names:
         if not proj.skills:
             _emit(emit, "No enabled skills to disable.")
-            # Interactive empty: success-like no-op without a requested name.
-            return DisableResult(
-                outcomes=[DisableOutcome(action="not_enabled", skill={"name": ""})]
-            )
-        typer.echo("Enabled skills:")
-        skill_labels = [f"{s.name}  ({s.repo}:{s.path})" for s in proj.skills]
-        selected_idxs = _numbered_multi_select(
-            skill_labels, "Select skills to disable (numbers, space-separated):"
-        )
+            return DisableResult(outcomes=[])
+        ui = _resolve_picker(picker, command="disable")
+        ordered_names = ui.select_skills_to_disable([s.name for s in proj.skills])
+        if not ordered_names:
+            _emit(emit, "Nothing to disable.")
+            return DisableResult(outcomes=[])
         by_name = {s.name: s for s in proj.skills}
-        ordered_names = [proj.skills[i].name for i in selected_idxs]
         return _disable_apply_batch(
             project_config, cache_root, skills_dir, proj, ordered_names, by_name, emit=emit
         )
@@ -918,16 +964,16 @@ def run_available_skills(
         if not repo_dir.is_dir():
             raise NotFoundError(f"source repo {repo!r} is not cached")
         skills = [
-            {"name": n, "repo": repo, "path": p}
-            for n, p in _scan_skills(repo_dir, repo, include_all=include_all)
+            {"name": s.name, "repo": repo, "path": s.path}
+            for s in _scan_skills(repo_dir, repo, include_all=include_all)
         ]
         return AvailableSkillsResult(skills=skills)
 
     skills: list[dict[str, str]] = []
     for cached_repo in _list_cached_repos(cache_root):
         repo_dir = cache_root / cached_repo
-        for n, p in _scan_skills(repo_dir, cached_repo, include_all=include_all):
-            skills.append({"name": n, "repo": cached_repo, "path": p})
+        for s in _scan_skills(repo_dir, cached_repo, include_all=include_all):
+            skills.append({"name": s.name, "repo": cached_repo, "path": s.path})
     return AvailableSkillsResult(skills=skills)
 
 
@@ -1014,12 +1060,15 @@ def enable(
     """Enable one or more skills from a cached repo (interactive if no args)."""
     try:
         name_list = list(names or [])
-        if _is_json(ctx) and (repo is None or not name_list):
+        interactive = repo is None and not name_list
+        if _is_json(ctx) and interactive:
             raise click.exceptions.UsageError(
                 "enable requires REPO and NAME(s) in --json mode (non-interactive)"
             )
         emit = None if _is_json(ctx) else typer.echo
         decl_path, skills_dir = _scope_paths(ctx)
+        # Interactive path builds the default questionary picker inside the runner
+        # (after TTY check). Non-interactive never opens a TUI.
         result = run_enable(
             decl_path,
             paths.config_file(),
@@ -1033,6 +1082,10 @@ def enable(
         if _is_json(ctx):
             _success(ctx, result.to_data())
         # Text mode: progress / status lines already streamed via emit.
+    except PickerCancelled:
+        if not _is_json(ctx):
+            typer.echo("Cancelled.", err=True)
+        raise typer.Exit(1) from None
     except (ConfigError, SourceError, LinkError, NotFoundError, UsageError) as e:
         _handle_command_error(ctx, e)
 
@@ -1048,7 +1101,8 @@ def disable(
     """Disable one or more enabled skills (interactive if no args)."""
     try:
         name_list = list(names or [])
-        if _is_json(ctx) and not name_list:
+        interactive = not name_list
+        if _is_json(ctx) and interactive:
             raise click.exceptions.UsageError(
                 "disable requires NAME(s) in --json mode (non-interactive)"
             )
@@ -1064,6 +1118,10 @@ def disable(
         )
         if _is_json(ctx):
             _success(ctx, result.to_data())
+    except PickerCancelled:
+        if not _is_json(ctx):
+            typer.echo("Cancelled.", err=True)
+        raise typer.Exit(1) from None
     except (ConfigError, SourceError, LinkError, NotFoundError, UsageError) as e:
         _handle_command_error(ctx, e)
 

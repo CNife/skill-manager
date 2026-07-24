@@ -45,9 +45,9 @@ _Avoid_: install, copy, 安装
 _Avoid_: restore, apply, 恢复, 应用
 
 **enable / 启用**:
-向当前 Scope 的技能声明文件追加一条或多条 Skill declaration 并执行 sync；可交互选单，也可 `enable <repo> <name>…` 非交互批量启用（整批原子：任一名字无效则整批不生效）。
+向当前 Scope 的技能声明文件追加一条或多条 Skill declaration 并执行 sync；TTY 下可交互筛选勾选（先 Source 再 Skill），也可 `enable <repo> <name>…` 非交互批量启用（整批原子：任一名字无效则整批不生效）。
 _Avoid_: add, install, 添加, 安装
 
 **disable / 禁用**:
-从当前 Scope 的技能声明文件移除一条或多条 Skill declaration 并清理对应 Link；可交互选单，也可 `disable <name>…` 非交互批量禁用（宽松：未启用的名字为幂等 no-op）。
+从当前 Scope 的技能声明文件移除一条或多条 Skill declaration 并清理对应 Link；TTY 下可交互多选已启用项，也可 `disable <name>…` 非交互批量禁用（宽松：未启用的名字为幂等 no-op）。
 _Avoid_: remove, uninstall, 删除, 卸载

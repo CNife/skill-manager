@@ -13,6 +13,7 @@ import json
 from pathlib import Path
 
 import pytest
+from helpers import skill_md
 from typer.testing import CliRunner
 
 from skill_manager import paths
@@ -35,7 +36,7 @@ def _parse_json(result) -> dict:
 
 def _seed_source(tmp_path: Path, make_source_repo, skills: dict[str, str] | None = None) -> str:
     """Clone a file:// source into the isolated cache; return full HEAD commit."""
-    skills = skills or {"skills/read": "# read\n"}
+    skills = skills or {"skills/read": skill_md("read")}
     upstream = make_source_repo("waza", skills)
     url = f"file://{upstream}"
     cfg = GlobalConfig()
@@ -144,9 +145,30 @@ def test_global_enable_noninteractive(tmp_path: Path, make_source_repo) -> None:
 
 
 def test_global_enable_interactive(tmp_path: Path, make_source_repo) -> None:
+    """Global interactive enable uses the same picker seam as project scope."""
+    from skill_manager.cli import run_enable
+
     _seed_source(tmp_path, make_source_repo)
-    result = runner.invoke(app, ["--global", "enable"], input="1\n1\n")
-    assert result.exit_code == 0, result.output
+
+    class PickRead:
+        def select_source(self, choices):
+            return "tw93/Waza"
+
+        def select_skills_to_enable(self, choices):
+            assert any(c.name == "read" for c in choices)
+            return ["read"]
+
+        def select_skills_to_disable(self, names):
+            raise AssertionError("not used")
+
+    result = run_enable(
+        paths.global_skills_config_path(),
+        paths.config_file(),
+        paths.repos_cache_dir(),
+        paths.global_skills_dir(),
+        picker=PickRead(),
+    )
+    assert [o.action for o in result.outcomes] == ["enabled"]
     decl = load_skill_declarations(paths.global_skills_config_path())
     assert [s.name for s in decl.skills] == ["read"]
     assert (paths.global_skills_dir() / "read" / "SKILL.md").is_file()
