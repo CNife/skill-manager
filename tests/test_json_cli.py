@@ -352,8 +352,9 @@ def test_json_enable_success(
     body = _parse_json(result)
     assert body["ok"] is True
     data = body["data"]
-    assert data["action"] == "enabled"
-    assert data["skill"] == {"name": "read", "repo": "tw93/Waza", "path": "skills/read"}
+    assert data["results"] == [
+        {"action": "enabled", "skill": {"name": "read", "repo": "tw93/Waza", "path": "skills/read"}}
+    ]
     assert data["sync"]["sources"] == [{"repo": "tw93/Waza", "commit": head}]
     assert data["sync"]["links"] == [{"name": "read", "action": "created"}]
     proj = load_skill_declarations(project / ".skill-manager.json")
@@ -371,12 +372,12 @@ def test_json_enable_already_enabled(
     result = runner.invoke(app, ["--json", "enable", "tw93/Waza", "read"])
     assert result.exit_code == 0, result.output
     body = _parse_json(result)
-    assert body["data"]["action"] == "already_enabled"
-    assert body["data"]["skill"] == {
-        "name": "read",
-        "repo": "tw93/Waza",
-        "path": "skills/read",
-    }
+    assert body["data"]["results"] == [
+        {
+            "action": "already_enabled",
+            "skill": {"name": "read", "repo": "tw93/Waza", "path": "skills/read"},
+        }
+    ]
     assert "sync" not in body["data"]
     assert (project / ".skill-manager.json").read_text() == before
 
@@ -392,8 +393,9 @@ def test_json_enable_bootstraps_missing_project_config(
     body = _parse_json(result)
     assert body["ok"] is True
     data = body["data"]
-    assert data["action"] == "enabled"
-    assert data["skill"] == {"name": "read", "repo": "tw93/Waza", "path": "skills/read"}
+    assert data["results"] == [
+        {"action": "enabled", "skill": {"name": "read", "repo": "tw93/Waza", "path": "skills/read"}}
+    ]
     assert data["sync"]["sources"] == [{"repo": "tw93/Waza", "commit": head}]
     assert data["sync"]["links"] == [{"name": "read", "action": "created"}]
     proj = load_skill_declarations(project / ".skill-manager.json")
@@ -413,8 +415,9 @@ def test_json_enable_bootstraps_empty_project_config(
     body = _parse_json(result)
     assert body["ok"] is True
     data = body["data"]
-    assert data["action"] == "enabled"
-    assert data["skill"] == {"name": "read", "repo": "tw93/Waza", "path": "skills/read"}
+    assert data["results"] == [
+        {"action": "enabled", "skill": {"name": "read", "repo": "tw93/Waza", "path": "skills/read"}}
+    ]
     assert data["sync"]["sources"] == [{"repo": "tw93/Waza", "commit": head}]
     proj = load_skill_declarations(project / ".skill-manager.json")
     assert len(proj.skills) == 1
@@ -521,13 +524,13 @@ def test_json_disable_success(
     assert result.exit_code == 0, result.output
     body = _parse_json(result)
     assert body["ok"] is True
-    assert body["data"]["action"] == "disabled"
-    assert body["data"]["skill"] == {
+    assert body["data"]["results"][0]["action"] == "disabled"
+    assert body["data"]["results"][0]["skill"] == {
         "name": "read",
         "repo": "tw93/Waza",
         "path": "skills/read",
     }
-    assert body["data"]["link_removed"] is True
+    assert body["data"]["results"][0]["link_removed"] is True
     proj = load_skill_declarations(project / ".skill-manager.json")
     assert proj.skills == []
     assert not (project / ".agents" / "skills" / "read").exists()
@@ -539,7 +542,7 @@ def test_json_disable_not_enabled(tmp_path: Path, monkeypatch: pytest.MonkeyPatc
     result = runner.invoke(app, ["--json", "disable", "read"])
     assert result.exit_code == 0, result.output
     body = _parse_json(result)
-    assert body["data"] == {"action": "not_enabled", "skill": {"name": "read"}}
+    assert body["data"] == {"results": [{"action": "not_enabled", "skill": {"name": "read"}}]}
 
 
 def test_json_disable_missing_args_usage_error(
@@ -567,6 +570,6 @@ def test_json_disable_external_link_not_removed(
     result = runner.invoke(app, ["--json", "disable", "read"])
     assert result.exit_code == 0, result.output
     body = _parse_json(result)
-    assert body["data"]["action"] == "disabled"
-    assert body["data"]["link_removed"] is False
+    assert body["data"]["results"][0]["action"] == "disabled"
+    assert body["data"]["results"][0]["link_removed"] is False
     assert (skills_dir / "read").is_symlink()

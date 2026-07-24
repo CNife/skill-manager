@@ -7,6 +7,7 @@ console_scripts target.
 from __future__ import annotations
 
 import json
+import re
 import sys
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -65,21 +66,17 @@ class ListResult:
     # (repo, head8_or_dash, "cached"|"missing")
 
 
-@dataclass
-class EnableResult:
+@dataclass(frozen=True)
+class EnableOutcome:
     action: str  # enabled | already_enabled
     skill: dict[str, str]
-    sync: SyncResult | None = None
 
     def to_data(self) -> dict[str, Any]:
-        data: dict[str, Any] = {"action": self.action, "skill": self.skill}
-        if self.sync is not None:
-            data["sync"] = self.sync.to_data()
-        return data
+        return {"action": self.action, "skill": self.skill}
 
 
-@dataclass
-class DisableResult:
+@dataclass(frozen=True)
+class DisableOutcome:
     action: str  # disabled | not_enabled
     skill: dict[str, str]
     link_removed: bool | None = None
@@ -89,6 +86,26 @@ class DisableResult:
         if self.link_removed is not None:
             data["link_removed"] = self.link_removed
         return data
+
+
+@dataclass
+class EnableResult:
+    outcomes: list[EnableOutcome] = field(default_factory=list)
+    sync: SyncResult | None = None
+
+    def to_data(self) -> dict[str, Any]:
+        data: dict[str, Any] = {"results": [o.to_data() for o in self.outcomes]}
+        if self.sync is not None:
+            data["sync"] = self.sync.to_data()
+        return data
+
+
+@dataclass
+class DisableResult:
+    outcomes: list[DisableOutcome] = field(default_factory=list)
+
+    def to_data(self) -> dict[str, Any]:
+        return {"results": [o.to_data() for o in self.outcomes]}
 
 
 @dataclass
@@ -518,6 +535,49 @@ def _numbered_select(items: list[str], prompt: str) -> int:
             raise typer.Exit(code=1) from None
 
 
+def _numbered_multi_select(items: list[str], prompt: str) -> list[int]:
+    """Display a numbered menu; return selected indices (ascending, deduped).
+
+    Accepts one or more 1-based numbers separated by spaces and/or commas
+    (e.g. ``1 3 5`` or ``1,3``). Re-prompts until every token is a valid in-range
+    number, reporting the offending token. A single number selects one item.
+    """
+    for i, item in enumerate(items, 1):
+        typer.echo(f"  {i:>3}. {item}")
+    while True:
+        try:
+            raw = input(f"{prompt} ")
+        except EOFError:
+            typer.echo("Invalid input", err=True)
+            continue
+        except KeyboardInterrupt:
+            raise typer.Exit(code=1) from None
+        tokens = [t for t in re.split(r"[,\s]+", raw.strip()) if t]
+        if not tokens:
+            typer.echo("Invalid input", err=True)
+            continue
+        idxs: set[int] = set()
+        bad: str | None = None
+        for tok in tokens:
+            try:
+                num = int(tok)
+            except ValueError:
+                bad = tok
+                break
+            if not 1 <= num <= len(items):
+                bad = tok
+                break
+            idxs.add(num - 1)
+        if bad is not None:
+            typer.echo(
+                f"Invalid choice: {bad!r} (enter numbers between 1 and {len(items)}, "
+                "separated by spaces)",
+                err=True,
+            )
+            continue
+        return sorted(idxs)
+
+
 def run_enable(
     project_config: Path,
     global_config_path: Path,
@@ -525,29 +585,32 @@ def run_enable(
     skills_dir: Path,
     *,
     repo: str | None = None,
-    name: str | None = None,
+    names: list[str] | None = None,
     include_all: bool = False,
     url_resolver: Callable[[str], str] | None = None,
     emit: Callable[[str], None] | None = None,
 ) -> EnableResult:
-    """Enable a skill interactively or non-interactively.
+    """Enable one or more skills interactively or non-interactively.
 
-    Non-interactive when both ``repo`` and ``name`` are provided. Interactive
-    when both are omitted. Partial args are a usage error (raised by caller).
-    ``include_all`` widens Source skill discovery (hidden / internal).
+    Non-interactive (batch) when ``repo`` and at least one name are provided.
+    Interactive when both are omitted. ``repo`` without names is a usage error.
+    ``include_all`` widens Source skill discovery (hidden / internal). The batch
+    is atomic: if any requested name is invalid, nothing is applied.
     """
-    if repo is None and name is None:
+    names = list(names or [])
+    if repo is None and not names:
         return _enable_interactive(
             project_config,
             global_config_path,
             cache_root,
             skills_dir,
             include_all=include_all,
+            url_resolver=url_resolver,
             emit=emit,
         )
-    if repo is None or name is None:
+    if repo is None or not names:
         raise click.exceptions.UsageError(
-            "enable requires both REPO and NAME, or neither for interactive mode"
+            "enable requires REPO and at least one NAME, or neither for interactive mode"
         )
     return _enable_noninteractive(
         project_config,
@@ -555,7 +618,7 @@ def run_enable(
         cache_root,
         skills_dir,
         repo=repo,
-        name=name,
+        names=names,
         include_all=include_all,
         url_resolver=url_resolver,
         emit=emit,
@@ -575,6 +638,7 @@ def _enable_interactive(
     skills_dir: Path,
     *,
     include_all: bool,
+    url_resolver: Callable[[str], str] | None,
     emit: Callable[[str], None] | None,
 ) -> EnableResult:
     repos = _list_cached_repos(cache_root)
@@ -594,18 +658,28 @@ def _enable_interactive(
 
     typer.echo(f"\nSkills in {selected_repo}:")
     skill_labels = [f"{n}  ({p})" for n, p in skills]
-    skill_idx = _numbered_select(skill_labels, "Select skill (number):")
-    selected_name, skill_path = skills[skill_idx]
+    selected_idxs = _numbered_multi_select(
+        skill_labels, "Select skills (numbers, space-separated):"
+    )
+    # Dedupe by skill name (a menu may list same-named skills at different
+    # paths); keep the first selected occurrence in ascending menu order.
+    resolved: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for idx in selected_idxs:
+        skill_name, skill_path = skills[idx]
+        if skill_name in seen:
+            continue
+        seen.add(skill_name)
+        resolved.append((skill_name, skill_path))
 
-    return _enable_apply(
+    return _enable_apply_batch(
         project_config,
         global_config_path,
         cache_root,
         skills_dir,
         repo=selected_repo,
-        name=selected_name,
-        skill_path=skill_path,
-        url_resolver=None,
+        resolved=resolved,
+        url_resolver=url_resolver,
         emit=emit,
     )
 
@@ -617,90 +691,113 @@ def _enable_noninteractive(
     skills_dir: Path,
     *,
     repo: str,
-    name: str,
+    names: list[str],
     include_all: bool,
     url_resolver: Callable[[str], str] | None,
     emit: Callable[[str], None] | None,
 ) -> EnableResult:
     proj = _load_declarations_for_enable(project_config)
-    existing = next((s for s in proj.skills if s.name == name), None)
-    if existing is not None:
-        # Idempotent early return: no sync, no cache validation.
-        _emit(emit, f"Skill {name!r} already enabled")
-        return EnableResult(
-            action="already_enabled",
-            skill={"name": existing.name, "repo": existing.repo, "path": existing.path},
-        )
+    enabled = {s.name for s in proj.skills}
+    # Dedupe requested names, preserving first-seen order.
+    unique_names = list(dict.fromkeys(names))
+    needs_resolution = [n for n in unique_names if n not in enabled]
 
-    repo_dir = cache_root / repo
-    if not repo_dir.is_dir():
-        raise NotFoundError(f"source repo {repo!r} is not cached")
+    # Resolve only the not-yet-enabled names against the cached Source. Atomic:
+    # collect every failure and abort the whole batch before any write.
+    resolved_paths: dict[str, str] = {}
+    failures: list[str] = []
+    has_not_found = False
+    if needs_resolution:
+        repo_dir = cache_root / repo
+        if not repo_dir.is_dir():
+            raise NotFoundError(f"source repo {repo!r} is not cached")
+        available = _scan_skills(repo_dir, repo, include_all=include_all)
+        for skill_name in needs_resolution:
+            matches = [(n, p) for n, p in available if n == skill_name]
+            if not matches:
+                has_not_found = True
+                failures.append(f"skill {skill_name!r} not found in cached repo {repo!r}")
+            elif len(matches) > 1:
+                paths_list = ", ".join(p for _, p in matches)
+                failures.append(
+                    f"skill {skill_name!r} is ambiguous in {repo!r}; matching paths: {paths_list}"
+                )
+            else:
+                resolved_paths[skill_name] = matches[0][1]
+        if failures:
+            msg = "; ".join(failures)
+            if has_not_found and not include_all:
+                msg += _ALL_HINT
+            raise NotFoundError(msg)
 
-    matches = [
-        (n, p) for n, p in _scan_skills(repo_dir, repo, include_all=include_all) if n == name
-    ]
-    if not matches:
-        msg = f"skill {name!r} not found in cached repo {repo!r}"
-        if not include_all:
-            msg += _ALL_HINT
-        raise NotFoundError(msg)
-    if len(matches) > 1:
-        paths_list = ", ".join(p for _, p in matches)
-        raise NotFoundError(
-            f"skill {name!r} is ambiguous in {repo!r}; matching paths: {paths_list}"
-        )
-    _matched_name, skill_path = matches[0]
-    return _enable_apply(
+    # Rebuild request order; already-enabled names carry an empty path (the
+    # apply phase reads their existing declaration instead).
+    resolved = [(n, "" if n in enabled else resolved_paths[n]) for n in unique_names]
+    return _enable_apply_batch(
         project_config,
         global_config_path,
         cache_root,
         skills_dir,
         repo=repo,
-        name=name,
-        skill_path=skill_path,
+        resolved=resolved,
         url_resolver=url_resolver,
         emit=emit,
     )
 
 
-def _enable_apply(
+def _enable_apply_batch(
     project_config: Path,
     global_config_path: Path,
     cache_root: Path,
     skills_dir: Path,
     *,
     repo: str,
-    name: str,
-    skill_path: str,
+    resolved: list[tuple[str, str]],
     url_resolver: Callable[[str], str] | None,
     emit: Callable[[str], None] | None,
 ) -> EnableResult:
+    """Commit a validated, deduped batch of (name, path) skills.
+
+    Already-enabled names are idempotent successes (their path entry is
+    ignored); new names are appended and a single sync runs only when at least
+    one skill was added.
+    """
     proj = _load_declarations_for_enable(project_config)
-    existing = next((s for s in proj.skills if s.name == name), None)
-    if existing is not None:
-        _emit(emit, f"Skill {name!r} already enabled")
-        return EnableResult(
-            action="already_enabled",
-            skill={"name": existing.name, "repo": existing.repo, "path": existing.path},
+    enabled = {s.name: s for s in proj.skills}
+    outcomes: list[EnableOutcome] = []
+    added = 0
+    for skill_name, skill_path in resolved:
+        existing = enabled.get(skill_name)
+        if existing is not None:
+            _emit(emit, f"Skill {skill_name!r} already enabled")
+            outcomes.append(
+                EnableOutcome(
+                    action="already_enabled",
+                    skill={"name": existing.name, "repo": existing.repo, "path": existing.path},
+                )
+            )
+            continue
+        proj.skills.append(SkillRef(name=skill_name, repo=repo, path=skill_path))
+        _emit(emit, f"Added {skill_name} ({repo}:{skill_path}) to {project_config}")
+        outcomes.append(
+            EnableOutcome(
+                action="enabled", skill={"name": skill_name, "repo": repo, "path": skill_path}
+            )
         )
+        added += 1
 
-    proj.skills.append(SkillRef(name=name, repo=repo, path=skill_path))
-    config.save_skill_declarations(project_config, proj)
-    _emit(emit, f"Added {name} ({repo}:{skill_path}) to {project_config}")
-
-    sync_result = run_sync(
-        project_config,
-        global_config_path,
-        cache_root,
-        skills_dir,
-        url_resolver=url_resolver,
-        emit=emit,
-    )
-    return EnableResult(
-        action="enabled",
-        skill={"name": name, "repo": repo, "path": skill_path},
-        sync=sync_result,
-    )
+    sync_result = None
+    if added:
+        config.save_skill_declarations(project_config, proj)
+        sync_result = run_sync(
+            project_config,
+            global_config_path,
+            cache_root,
+            skills_dir,
+            url_resolver=url_resolver,
+            emit=emit,
+        )
+    return EnableResult(outcomes=outcomes, sync=sync_result)
 
 
 def run_disable(
@@ -709,60 +806,103 @@ def run_disable(
     cache_root: Path,
     skills_dir: Path,
     *,
-    name: str | None = None,
+    names: list[str] | None = None,
     emit: Callable[[str], None] | None = None,
 ) -> DisableResult:
-    """Disable a skill interactively (name is None) or non-interactively."""
+    """Disable one or more skills (interactive when ``names`` is empty).
+
+    Lenient: disabling a name that is not enabled is an idempotent no-op
+    reported per name, never an error. Declarations are removed and the config
+    saved once for the whole batch.
+    """
+    names = list(names or [])
     proj = config.load_skill_declarations(project_config)
 
-    if name is None:
+    if not names:
         if not proj.skills:
             _emit(emit, "No enabled skills to disable.")
             # Interactive empty: success-like no-op without a requested name.
-            return DisableResult(action="not_enabled", skill={"name": ""})
+            return DisableResult(
+                outcomes=[DisableOutcome(action="not_enabled", skill={"name": ""})]
+            )
         typer.echo("Enabled skills:")
         skill_labels = [f"{s.name}  ({s.repo}:{s.path})" for s in proj.skills]
-        idx = _numbered_select(skill_labels, "Select skill to disable (number):")
-        skill = proj.skills[idx]
-        return _disable_apply(project_config, cache_root, skills_dir, skill, emit=emit)
+        selected_idxs = _numbered_multi_select(
+            skill_labels, "Select skills to disable (numbers, space-separated):"
+        )
+        by_name = {s.name: s for s in proj.skills}
+        ordered_names = [proj.skills[i].name for i in selected_idxs]
+        return _disable_apply_batch(
+            project_config, cache_root, skills_dir, proj, ordered_names, by_name, emit=emit
+        )
 
-    existing = next((s for s in proj.skills if s.name == name), None)
-    if existing is None:
-        _emit(emit, f"Skill {name!r} not enabled")
-        return DisableResult(action="not_enabled", skill={"name": name})
-    return _disable_apply(project_config, cache_root, skills_dir, existing, emit=emit)
+    by_name = {s.name: s for s in proj.skills}
+    ordered_names = list(dict.fromkeys(names))
+    return _disable_apply_batch(
+        project_config, cache_root, skills_dir, proj, ordered_names, by_name, emit=emit
+    )
 
 
-def _disable_apply(
+def _disable_apply_batch(
     project_config: Path,
     cache_root: Path,
     skills_dir: Path,
-    skill: SkillRef,
+    proj: config.SkillDeclarations,
+    ordered_names: list[str],
+    by_name: dict[str, SkillRef],
     *,
     emit: Callable[[str], None] | None,
 ) -> DisableResult:
-    proj = config.load_skill_declarations(project_config)
-    proj.skills = [s for s in proj.skills if s.name != skill.name]
-    config.save_skill_declarations(project_config, proj)
-    _emit(emit, f"Removed {skill.name} from {project_config}")
+    """Disable the given names in order; report each as disabled or not_enabled.
 
+    Removes all disabled declarations and saves the config once at the end.
+    """
+    outcomes: list[DisableOutcome] = []
+    disabled_names: set[str] = set()
+    for name in ordered_names:
+        skill = by_name.get(name)
+        if skill is None:
+            _emit(emit, f"Skill {name!r} not enabled")
+            outcomes.append(DisableOutcome(action="not_enabled", skill={"name": name}))
+            continue
+        _emit(emit, f"Removed {skill.name} from {project_config}")
+        link_removed = _clean_link(cache_root, skills_dir, skill, emit)
+        outcomes.append(
+            DisableOutcome(
+                action="disabled",
+                skill={"name": skill.name, "repo": skill.repo, "path": skill.path},
+                link_removed=link_removed,
+            )
+        )
+        disabled_names.add(name)
+    if disabled_names:
+        proj.skills = [s for s in proj.skills if s.name not in disabled_names]
+        config.save_skill_declarations(project_config, proj)
+    return DisableResult(outcomes=outcomes)
+
+
+def _clean_link(
+    cache_root: Path,
+    skills_dir: Path,
+    skill: SkillRef,
+    emit: Callable[[str], None] | None,
+) -> bool:
+    """Remove the managed symlink for ``skill`` if it points at the cached source.
+
+    Returns True when a link was removed. External symlinks and non-symlink
+    entries are left untouched (reported, not an error).
+    """
     link = skills_dir / skill.name
     target_path = (cache_root / skill.repo / skill.path).resolve()
-    link_removed = False
     if link.is_symlink() and links.link_points_to(link, target_path):
         link.unlink()
-        link_removed = True
         _emit(emit, f"Removed symlink {link}")
-    elif link.is_symlink():
+        return True
+    if link.is_symlink():
         _emit(emit, f"Skipped {link}: points elsewhere (not managed by skill-manager)")
     elif link.exists():
         _emit(emit, f"Skipped {link}: not a symlink")
-
-    return DisableResult(
-        action="disabled",
-        skill={"name": skill.name, "repo": skill.repo, "path": skill.path},
-        link_removed=link_removed,
-    )
+    return False
 
 
 def run_available_skills(
@@ -859,7 +999,10 @@ def list_(ctx: typer.Context) -> None:
 def enable(
     ctx: typer.Context,
     repo: Annotated[str | None, typer.Argument(help="Source repo (owner/repo).")] = None,
-    name: Annotated[str | None, typer.Argument(help="Skill name within the repo.")] = None,
+    names: Annotated[
+        list[str] | None,
+        typer.Argument(help="Skill name(s) within the repo."),
+    ] = None,
     include_all: Annotated[
         bool,
         typer.Option(
@@ -868,20 +1011,14 @@ def enable(
         ),
     ] = False,
 ) -> None:
-    """Enable a skill from a cached repo (interactive if no args)."""
+    """Enable one or more skills from a cached repo (interactive if no args)."""
     try:
-        if _is_json(ctx) and (repo is None or name is None):
+        name_list = list(names or [])
+        if _is_json(ctx) and (repo is None or not name_list):
             raise click.exceptions.UsageError(
-                "enable requires REPO and NAME in --json mode (non-interactive)"
-            )
-        if (repo is None) ^ (name is None):
-            raise click.exceptions.UsageError(
-                "enable requires both REPO and NAME, or neither for interactive mode"
+                "enable requires REPO and NAME(s) in --json mode (non-interactive)"
             )
         emit = None if _is_json(ctx) else typer.echo
-        # Interactive path still needs menus on stdout even when emit is typer.echo;
-        # pass emit only for structured progress in non-json mode. For interactive
-        # selection, run_enable uses typer.echo/input directly for menus.
         decl_path, skills_dir = _scope_paths(ctx)
         result = run_enable(
             decl_path,
@@ -889,7 +1026,7 @@ def enable(
             paths.repos_cache_dir(),
             skills_dir,
             repo=repo,
-            name=name,
+            names=name_list,
             include_all=include_all,
             emit=emit,
         )
@@ -903,13 +1040,17 @@ def enable(
 @app.command()
 def disable(
     ctx: typer.Context,
-    name: Annotated[str | None, typer.Argument(help="Enabled skill name.")] = None,
+    names: Annotated[
+        list[str] | None,
+        typer.Argument(help="Enabled skill name(s)."),
+    ] = None,
 ) -> None:
-    """Disable an enabled skill (interactive if no args)."""
+    """Disable one or more enabled skills (interactive if no args)."""
     try:
-        if _is_json(ctx) and name is None:
+        name_list = list(names or [])
+        if _is_json(ctx) and not name_list:
             raise click.exceptions.UsageError(
-                "disable requires NAME in --json mode (non-interactive)"
+                "disable requires NAME(s) in --json mode (non-interactive)"
             )
         emit = None if _is_json(ctx) else typer.echo
         decl_path, skills_dir = _scope_paths(ctx)
@@ -918,7 +1059,7 @@ def disable(
             paths.config_file(),
             paths.repos_cache_dir(),
             skills_dir,
-            name=name,
+            names=name_list,
             emit=emit,
         )
         if _is_json(ctx):

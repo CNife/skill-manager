@@ -12,7 +12,7 @@ Project Links live under `./.agents/skills/`; user-global Links under `~/.agents
 
 - **Declare and sync project skills** — write `.skill-manager.json`, run `skill-manager sync`
 - **Inspect source and link status** — `skill-manager list` (`linked` / `external` / `broken` / `unlinked`)
-- **Enable / disable** — interactive menus, or non-interactive `enable <repo> <name>` / `disable <name>`
+- **Enable / disable** — interactive menus (multi-select) or non-interactive batch `enable <repo> <name>...` / `disable <name>...`
 - **Manage source cache** — `skill-manager source list|add|remove|update|available-skills`
 - **Global skills** - `--global` flag applies any command to user-global skills (`~/.skill-manager.json`, `~/.agents/skills/`)
 - **Scripting / CI** — root `--json` on every command (`skill-manager --json <cmd> ...`)
@@ -51,13 +51,26 @@ Create `./.skill-manager.json` in your project:
 ```bash
 skill-manager sync                     # clone/fetch sources, link declared skills
 skill-manager list                     # show sources and skill status
-skill-manager enable                   # interactive: pick cached repo + skill, then sync
-skill-manager enable <repo> <name>     # non-interactive enable (path derived from cache)
+skill-manager enable                   # interactive: pick repo, multi-select skills, then sync
+skill-manager enable <repo> <name>...  # non-interactive batch enable (path derived from cache)
 skill-manager enable --all ...         # include hidden/internal skills when resolving
-skill-manager disable                  # interactive: pick an enabled skill
-skill-manager disable <name>           # non-interactive disable
+skill-manager disable                  # interactive: multi-select enabled skills
+skill-manager disable <name>...        # non-interactive batch disable
 skill-manager --json sync              # single JSON object on stdout (all commands)
 ```
+
+### Batch enable / disable
+
+`enable` and `disable` accept multiple skills in one invocation:
+
+```bash
+skill-manager enable tw93/Waza read write kami   # enable several skills from one repo
+skill-manager disable read write                 # disable several skills
+```
+
+- **enable is atomic**: every name is validated first; if any is missing or ambiguous, nothing is applied and all problems are reported at once (exit 1). Already-enabled names are idempotent no-ops. The whole batch syncs once.
+- **disable is lenient**: disabling a name that is not enabled is a no-op, never an error.
+- **Interactive multi-select**: the menus accept several numbers separated by spaces and/or commas (e.g. `1 3 5` or `1,3`); a single number still selects one skill. For `enable`, the repo is picked first, then skills are multi-selected within it.
 
 ### Global skills
 
@@ -66,8 +79,8 @@ Add `--global` to any of `sync` / `list` / `enable` / `disable` to target user-g
 ```bash
 skill-manager --global sync                  # link globally-declared skills into ~/.agents/skills/
 skill-manager --global list                  # show global skills status
-skill-manager --global enable <repo> <name>  # declare globally + sync
-skill-manager --global disable <name>        # remove a global declaration + link
+skill-manager --global enable <repo> <name>...  # declare globally + sync (batch)
+skill-manager --global disable <name>...        # remove global declarations + links (batch)
 skill-manager --json --global list           # JSON output composes with --global
 ```
 

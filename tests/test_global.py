@@ -137,7 +137,7 @@ def test_global_enable_noninteractive(tmp_path: Path, make_source_repo) -> None:
     result = runner.invoke(app, ["--json", "--global", "enable", "tw93/Waza", "read"])
     assert result.exit_code == 0, result.output
     body = _parse_json(result)
-    assert body["data"]["action"] == "enabled"
+    assert body["data"]["results"][0]["action"] == "enabled"
     decl = load_skill_declarations(paths.global_skills_config_path())
     assert [s.name for s in decl.skills] == ["read"]
     assert (paths.global_skills_dir() / "read" / "SKILL.md").is_file()
@@ -157,7 +157,7 @@ def test_global_enable_idempotent(tmp_path: Path, make_source_repo) -> None:
     runner.invoke(app, ["--json", "--global", "enable", "tw93/Waza", "read"])
     result = runner.invoke(app, ["--json", "--global", "enable", "tw93/Waza", "read"])
     assert result.exit_code == 0
-    assert _parse_json(result)["data"]["action"] == "already_enabled"
+    assert _parse_json(result)["data"]["results"][0]["action"] == "already_enabled"
     decl = load_skill_declarations(paths.global_skills_config_path())
     assert len(decl.skills) == 1
 
@@ -168,8 +168,8 @@ def test_global_disable_noninteractive(tmp_path: Path, make_source_repo) -> None
     result = runner.invoke(app, ["--json", "--global", "disable", "read"])
     assert result.exit_code == 0, result.output
     body = _parse_json(result)
-    assert body["data"]["action"] == "disabled"
-    assert body["data"]["link_removed"] is True
+    assert body["data"]["results"][0]["action"] == "disabled"
+    assert body["data"]["results"][0]["link_removed"] is True
     assert load_skill_declarations(paths.global_skills_config_path()).skills == []
     assert not (paths.global_skills_dir() / "read").exists()
 
