@@ -13,7 +13,7 @@ _Avoid_: package, installable, 包
 _Avoid_: registry, remote, 远端, 注册表
 
 **Skill declaration / 技能声明**:
-项目配置中的一条启用记录，由 `name`、`repo`、`path` 组成。
+项目或全局技能声明文件中的一条启用记录，由 `name`、`repo`、`path` 组成。
 _Avoid_: skill ref, entry, 安装项
 
 **Project config / 项目配置**:
@@ -24,22 +24,30 @@ _Avoid_: manifest, lockfile, 清单
 XDG 配置文件（默认 `~/.config/skill-manager/config.json`），记录各 Source 及其 HEAD commit。
 _Avoid_: ledger, database, 台账
 
+**Global skills declaration / 全局技能声明**:
+`~/.skill-manager.json`，声明用户全局启用哪些 Skill；与项目配置同形（`{skills:[...]}`）。与 Global config（源注册表）区分：本文件只存技能声明。
+_Avoid_: global config, user manifest
+
+**Scope / 作用域**:
+命令作用的目标范围：`project`（默认，`./`）或 `global`（`--global`，用户 home）。两者共享 Source 与缓存，仅声明文件与 Link 目录不同。
+_Avoid_: mode, level
+
 **Source cache / 源缓存**:
 XDG 缓存目录（默认 `~/.cache/skill-manager/repos/`），存放已克隆的 Source。
 _Avoid_: library, global library, 全局技能库
 
 **Link / 链接**:
-`./.agents/skills/<name>` 下的符号链接，指向源缓存内某个 Skill 目录。
+`./.agents/skills/<name>`（项目）或 `~/.agents/skills/<name>`（全局）下的符号链接，指向源缓存内某个 Skill 目录。
 _Avoid_: install, copy, 安装
 
 **sync / 同步**:
-幂等操作：确保 Source 已克隆、记录 HEAD、为已声明 Skill 创建 Link。
+幂等操作：确保 Source 已克隆、记录 HEAD、为已声明 Skill 创建 Link。作用于当前 Scope（项目或全局）。
 _Avoid_: restore, apply, 恢复, 应用
 
 **enable / 启用**:
-向项目配置追加一条 Skill declaration 并执行 sync；可交互选单，也可 `enable <repo> <name>` 非交互。
+向当前 Scope 的技能声明文件追加一条 Skill declaration 并执行 sync；可交互选单，也可 `enable <repo> <name>` 非交互。
 _Avoid_: add, install, 添加, 安装
 
 **disable / 禁用**:
-从项目配置移除一条 Skill declaration 并清理对应 Link；可交互选单，也可 `disable <name>` 非交互。
+从当前 Scope 的技能声明文件移除一条 Skill declaration 并清理对应 Link；可交互选单，也可 `disable <name>` 非交互。
 _Avoid_: remove, uninstall, 删除, 卸载
