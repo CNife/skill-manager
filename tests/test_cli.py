@@ -3,6 +3,7 @@ import shutil
 from pathlib import Path
 
 import pytest
+from helpers import skill_md
 from typer.testing import CliRunner
 
 from skill_manager.cli import app, run_list, run_sync
@@ -59,7 +60,7 @@ def test_sync_bad_json(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_run_sync_end_to_end(tmp_path: Path, make_source_repo) -> None:
-    repo = make_source_repo("waza", {"skills/read": "# read\n"})
+    repo = make_source_repo("waza", {"skills/read": skill_md("read")})
     url = f"file://{repo}"
     project = tmp_path / "proj"
     project.mkdir()
@@ -71,14 +72,14 @@ def test_run_sync_end_to_end(tmp_path: Path, make_source_repo) -> None:
         project / ".skill-manager.json", gconfig, cache, skills_dir, url_resolver=lambda r: url
     )
     assert (skills_dir / "read").is_symlink()
-    assert (skills_dir / "read" / "SKILL.md").read_text() == "# read\n"
+    assert "name: read" in (skills_dir / "read" / "SKILL.md").read_text()
     gdata = json.loads(gconfig.read_text())
     assert "tw93/Waza" in gdata["sources"]
     assert len(gdata["sources"]["tw93/Waza"]["commit"]) == 40
 
 
 def test_run_sync_idempotent(tmp_path: Path, make_source_repo) -> None:
-    repo = make_source_repo("waza", {"skills/read": "# read\n"})
+    repo = make_source_repo("waza", {"skills/read": skill_md("read")})
     url = f"file://{repo}"
     project = tmp_path / "proj"
     project.mkdir()
@@ -96,7 +97,7 @@ def test_run_sync_idempotent(tmp_path: Path, make_source_repo) -> None:
 
 
 def test_run_sync_path_not_found(tmp_path: Path, make_source_repo) -> None:
-    repo = make_source_repo("waza", {"skills/read": "# read\n"})
+    repo = make_source_repo("waza", {"skills/read": skill_md("read")})
     url = f"file://{repo}"
     project = tmp_path / "proj"
     project.mkdir()
@@ -111,7 +112,7 @@ def test_run_sync_path_not_found(tmp_path: Path, make_source_repo) -> None:
 
 
 def test_run_list(tmp_path: Path, make_source_repo) -> None:
-    repo = make_source_repo("waza", {"skills/read": "# read\n"})
+    repo = make_source_repo("waza", {"skills/read": skill_md("read")})
     url = f"file://{repo}"
     project = tmp_path / "proj"
     project.mkdir()
@@ -130,7 +131,7 @@ def test_run_list(tmp_path: Path, make_source_repo) -> None:
 
 
 def test_run_list_external_symlink(tmp_path: Path, make_source_repo) -> None:
-    repo = make_source_repo("waza", {"skills/read": "# read\n"})
+    repo = make_source_repo("waza", {"skills/read": skill_md("read")})
     url = f"file://{repo}"
     project = tmp_path / "proj"
     project.mkdir()
@@ -151,7 +152,7 @@ def test_run_list_external_symlink(tmp_path: Path, make_source_repo) -> None:
 
 
 def test_run_list_broken(tmp_path: Path, make_source_repo) -> None:
-    repo = make_source_repo("waza", {"skills/read": "# read\n"})
+    repo = make_source_repo("waza", {"skills/read": skill_md("read")})
     url = f"file://{repo}"
     project = tmp_path / "proj"
     project.mkdir()
@@ -186,12 +187,12 @@ def test_disable_help() -> None:
 
 
 def test_enable_no_cache(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """enable with empty cache prints error and exits non-zero."""
+    """Interactive enable on non-TTY fails before opening a picker (exit 1)."""
     monkeypatch.chdir(tmp_path)
     _write_config(tmp_path, [])
     result = runner.invoke(app, ["enable"])
     assert result.exit_code == 1
-    assert "No cached repos found" in result.output
+    assert "TTY" in result.output
 
 
 def test_disable_no_skills(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -204,7 +205,7 @@ def test_disable_no_skills(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> N
 
 
 def _enable_test_env(tmp_path: Path, make_source_repo):
-    repo = make_source_repo("waza", {"skills/read": "# read\n"})
+    repo = make_source_repo("waza", {"skills/read": skill_md("read")})
     url = f"file://{repo}"
     project = tmp_path / "proj"
     project.mkdir()
@@ -218,17 +219,33 @@ def _enable_test_env(tmp_path: Path, make_source_repo):
     return project, cache, gconfig, skills_dir
 
 
-def test_run_enable_adds_and_syncs(
-    tmp_path: Path, make_source_repo, monkeypatch: pytest.MonkeyPatch
-) -> None:
+class _PickAll:
+    """Minimal fake picker: first source, all unlocked skills / all disable names."""
+
+    def select_source(self, choices):
+        return choices[0].repo
+
+    def select_skills_to_enable(self, choices):
+        return [c.name for c in choices if not c.locked]
+
+    def select_skills_to_disable(self, names):
+        return list(names)
+
+
+def test_run_enable_adds_and_syncs(tmp_path: Path, make_source_repo) -> None:
     """run_enable scans cached repo, adds skill to config, and syncs."""
     project, cache, gconfig, skills_dir = _enable_test_env(tmp_path, make_source_repo)
     _write_config(project, [])  # clear config so we can re-add via enable
 
     from skill_manager.cli import run_enable
 
-    monkeypatch.setattr("builtins.input", lambda prompt="": next(iter(["1", "1"])))
-    run_enable(project / ".skill-manager.json", gconfig, cache, skills_dir)
+    run_enable(
+        project / ".skill-manager.json",
+        gconfig,
+        cache,
+        skills_dir,
+        picker=_PickAll(),
+    )
 
     proj = load_skill_declarations(project / ".skill-manager.json")
     assert len(proj.skills) == 1
@@ -236,19 +253,22 @@ def test_run_enable_adds_and_syncs(
     assert (skills_dir / "read").is_symlink()
 
 
-def test_run_enable_duplicate(
-    tmp_path: Path, make_source_repo, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_run_enable_duplicate(tmp_path: Path, make_source_repo) -> None:
     """run_enable with an already-enabled skill name is idempotent success."""
     project, cache, gconfig, skills_dir = _enable_test_env(tmp_path, make_source_repo)
     # Keep config as-is so the skill is already enabled
 
     from skill_manager.cli import run_enable
 
-    monkeypatch.setattr("builtins.input", lambda prompt="": next(iter(["1", "1"])))
-    result = run_enable(project / ".skill-manager.json", gconfig, cache, skills_dir)
-    assert [o.action for o in result.outcomes] == ["already_enabled"]
-    assert result.outcomes[0].skill["name"] == "read"
+    result = run_enable(
+        project / ".skill-manager.json",
+        gconfig,
+        cache,
+        skills_dir,
+        picker=_PickAll(),
+    )
+    # Locked-only submit is empty-submit success (nothing new to enable).
+    assert result.outcomes == []
     assert result.sync is None
 
 
@@ -256,7 +276,7 @@ def _seed_cached_source_direct(
     tmp_path: Path, make_source_repo, skills: dict[str, str] | None = None
 ) -> tuple[Path, Path, Path, Path, Path, str]:
     """Seed global config and cache for enable tests; do not write project config."""
-    skills = skills or {"skills/read": "# read\n"}
+    skills = skills or {"skills/read": skill_md("read")}
     upstream = make_source_repo("waza", skills)
     url = f"file://{upstream}"
     project = tmp_path / "proj"
@@ -336,11 +356,9 @@ def test_run_enable_rejects_invalid_project_config(tmp_path: Path, make_source_r
         )
 
 
-def test_run_disable_removes_and_cleans(
-    tmp_path: Path, make_source_repo, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_run_disable_removes_and_cleans(tmp_path: Path, make_source_repo) -> None:
     """run_disable removes config entry and deletes matching symlink."""
-    repo = make_source_repo("waza", {"skills/read": "# read\n"})
+    repo = make_source_repo("waza", {"skills/read": skill_md("read")})
     url = f"file://{repo}"
     project = tmp_path / "proj"
     project.mkdir()
@@ -354,12 +372,15 @@ def test_run_disable_removes_and_cleans(
     )
     assert (skills_dir / "read").is_symlink()
 
-    # Run disable: select skill #1
-    monkeypatch.setattr("builtins.input", lambda prompt="": "1")
-
     from skill_manager.cli import run_disable
 
-    run_disable(project / ".skill-manager.json", gconfig, cache, skills_dir)
+    run_disable(
+        project / ".skill-manager.json",
+        gconfig,
+        cache,
+        skills_dir,
+        picker=_PickAll(),
+    )
 
     # Verify config entry removed
     from skill_manager.config import load_skill_declarations
@@ -370,9 +391,7 @@ def test_run_disable_removes_and_cleans(
     assert not (skills_dir / "read").exists()
 
 
-def test_run_disable_skips_external_symlink(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_run_disable_skips_external_symlink(tmp_path: Path) -> None:
     """run_disable leaves an external (non-matching) symlink untouched."""
     project = tmp_path / "proj"
     project.mkdir()
@@ -390,11 +409,15 @@ def test_run_disable_skips_external_symlink(
     # Config declares a skill but the symlink points elsewhere
     _write_config(project, [{"name": "read", "repo": "tw93/Waza", "path": "skills/read"}])
 
-    monkeypatch.setattr("builtins.input", lambda prompt="": "1")
-
     from skill_manager.cli import run_disable
 
-    run_disable(project / ".skill-manager.json", gconfig, cache, skills_dir)
+    run_disable(
+        project / ".skill-manager.json",
+        gconfig,
+        cache,
+        skills_dir,
+        picker=_PickAll(),
+    )
 
     # Symlink still exists because it pointed elsewhere
     assert (skills_dir / "read").is_symlink()

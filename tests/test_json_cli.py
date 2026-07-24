@@ -7,6 +7,7 @@ import subprocess
 from pathlib import Path
 
 import pytest
+from helpers import skill_md
 from typer.testing import CliRunner
 
 from skill_manager.cli import app, run_sync
@@ -32,7 +33,7 @@ def _seed_cached_source(
     from skill_manager.config import GlobalConfig, save_global_config
     from skill_manager.sources import ensure_source
 
-    skills = skills or {"skills/read": "# read\n"}
+    skills = skills or {"skills/read": skill_md("read")}
     upstream = make_source_repo("waza", skills)
     url = f"file://{upstream}"
     cfg = GlobalConfig()
@@ -277,7 +278,7 @@ def test_json_available_skills_all(tmp_path: Path, make_source_repo) -> None:
     _seed_cached_source(
         tmp_path,
         make_source_repo,
-        {"skills/read": "# r\n", "skills/write": "# w\n"},
+        {"skills/read": skill_md("read"), "skills/write": skill_md("write")},
     )
     result = runner.invoke(app, ["--json", "source", "available-skills"])
     assert result.exit_code == 0, result.output
@@ -318,7 +319,9 @@ def test_available_skills_human_empty(tmp_path: Path) -> None:
 
 def test_available_skills_human_grouped(tmp_path: Path, make_source_repo) -> None:
     _seed_cached_source(
-        tmp_path, make_source_repo, {"skills/read": "# r\n", "skills/write": "# w\n"}
+        tmp_path,
+        make_source_repo,
+        {"skills/read": skill_md("read"), "skills/write": skill_md("write")},
     )
     result = runner.invoke(app, ["source", "available-skills"])
     assert result.exit_code == 0
@@ -465,7 +468,7 @@ def test_json_enable_ambiguous_name(
     project, _ = _seed_cached_source(
         tmp_path,
         make_source_repo,
-        {"a/dup": "# a\n", "b/dup": "# b\n"},
+        {"a/dup": skill_md("dup", "a"), "b/dup": skill_md("dup", "b")},
     )
     _write_config(project, [])
     monkeypatch.chdir(project)

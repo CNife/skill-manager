@@ -7,6 +7,7 @@ import subprocess
 from pathlib import Path
 
 import pytest
+from helpers import skill_md
 from typer.testing import CliRunner
 
 from skill_manager.cli import app
@@ -14,26 +15,28 @@ from skill_manager.config import load_skill_declarations
 
 runner = CliRunner()
 
-ACTIVE = "---\nname: active\ndescription: active skill\n---\n# active\n"
-INTERNAL = "---\nname: secret\nmetadata:\n  internal: true\n---\n# secret\n"
-INTERNAL_STRING = '---\nname: maybe\nmetadata:\n  internal: "true"\n---\n# maybe\n'
-INTERNAL_YES = "---\nname: maybe\nmetadata:\n  internal: yes\n---\n# maybe\n"
+ACTIVE = skill_md("active", "active skill")
+INTERNAL = skill_md("secret", "secret skill", extra_fm="metadata:\n  internal: true\n")
+INTERNAL_STRING = skill_md("maybe", "maybe skill", extra_fm='metadata:\n  internal: "true"\n')
+INTERNAL_YES = skill_md("maybe", "maybe skill", extra_fm="metadata:\n  internal: yes\n")
 NO_FM = "# plain skill without frontmatter\n"
-BAIT = "# nested bait should never appear\n"
-ARCHIVED = "# archived skill\n"
-NOISE = "# noise under skip dir\n"
-ROOT_SKILL = "---\nname: root-skill\ndescription: repo root\n---\n# root\n"
+BAIT = skill_md("bait", "nested bait should never appear")
+ARCHIVED = skill_md("old", "archived skill")
+NOISE = skill_md("noise", "noise under skip dir")
+ROOT_SKILL = skill_md("root-skill", "repo root", body="# root\n")
+MISSING_DESC = "---\nname: nodesc\n---\n# nodesc\n"
+EMPTY_NAME = "---\nname: ''\ndescription: x\n---\n# x\n"
 
 FILTERED_LAYOUT = {
     "skills/active": ACTIVE,
     "skills/secret": INTERNAL,
     ".archive/old": ARCHIVED,
-    "node_modules/pkg/fake": NOISE,
-    "dist/built": NOISE,
-    "build/out": NOISE,
-    "__pycache__/cached": NOISE,
+    "node_modules/pkg/fake": skill_md("fake", "noise under skip dir"),
+    "dist/built": skill_md("built", "noise under skip dir"),
+    "build/out": skill_md("out", "noise under skip dir"),
+    "__pycache__/cached": skill_md("cached", "noise under skip dir"),
     "skills/active/scripts/bait": BAIT,
-    "category/nested": ACTIVE,
+    "category/nested": skill_md("nested", "active skill"),
 }
 
 
@@ -59,7 +62,7 @@ def _seed_cached_source(
     from skill_manager.config import GlobalConfig, save_global_config
     from skill_manager.sources import ensure_source
 
-    skills = skills or {"skills/read": "# read\n"}
+    skills = skills or {"skills/read": skill_md("read")}
     upstream = make_source_repo(repo_name, skills)
     url = f"file://{upstream}"
     cfg = GlobalConfig()
@@ -116,7 +119,7 @@ def test_available_skills_skill_root_truncation_default_and_all(
     tmp_path: Path, make_source_repo
 ) -> None:
     layout = {
-        "skills/read": "# read\n",
+        "skills/read": skill_md("read"),
         "skills/read/references/nested": BAIT,
     }
     _seed_cached_source(tmp_path, make_source_repo, layout)
@@ -135,7 +138,7 @@ def test_json_available_skills_root_skill_layout(tmp_path: Path, make_source_rep
     result = runner.invoke(app, ["--json", "source", "available-skills", "tw93/Waza"])
     assert result.exit_code == 0, result.output
     body = _parse_json(result)
-    assert body["data"]["skills"] == [{"name": "waza", "repo": "tw93/Waza", "path": "."}]
+    assert body["data"]["skills"] == [{"name": "root-skill", "repo": "tw93/Waza", "path": "."}]
 
 
 def test_json_available_skills_default_empty_all_nonempty(tmp_path: Path, make_source_repo) -> None:
@@ -171,19 +174,27 @@ def test_json_available_skills_internal_non_bool_still_listed(
         tmp_path,
         make_source_repo,
         {
-            "skills/stringy": INTERNAL_STRING,
-            "skills/yesish": INTERNAL_YES,
+            "skills/stringy": skill_md(
+                "stringy", "stringy skill", extra_fm='metadata:\n  internal: "true"\n'
+            ),
+            "skills/yesish": skill_md(
+                "yesish", "yesish skill", extra_fm="metadata:\n  internal: yes\n"
+            ),
             "skills/plain": NO_FM,
             "skills/broken": "---\nmetadata: [not, a, mapping\n---\n# broken\n",
+            "skills/nodesc": MISSING_DESC,
         },
     )
     result = runner.invoke(app, ["--json", "source", "available-skills"])
     assert result.exit_code == 0, result.output
     keys = _skill_keys(_parse_json(result)["data"]["skills"])
+    # Non-bool internal still qualifies when name+description present.
     assert ("stringy", "skills/stringy") in keys
     assert ("yesish", "skills/yesish") in keys
-    assert ("plain", "skills/plain") in keys
-    assert ("broken", "skills/broken") in keys
+    # Unqualified (no FM name/description) omitted.
+    assert ("plain", "skills/plain") not in keys
+    assert ("broken", "skills/broken") not in keys
+    assert ("nodesc", "skills/nodesc") not in keys
 
 
 def test_available_skills_human_default_omits_archive(tmp_path: Path, make_source_repo) -> None:
@@ -352,36 +363,49 @@ def test_json_enable_without_args_still_usage_error(
     assert body["error"]["code"] == "usage_error"
 
 
-def test_enable_interactive_all_menu_includes_archive(
+def test_enable_interactive_all_includes_archive_via_picker(
     tmp_path: Path, make_source_repo, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    project, _ = _seed_cached_source(
-        tmp_path, make_source_repo, {".archive/old": ARCHIVED, "skills/active": ACTIVE}
-    )
+    """Interactive enable --all surfaces archived skills through the picker seam."""
+    from skill_manager.cli import run_enable
+    from skill_manager.config import GlobalConfig, save_global_config
+    from skill_manager.sources import ensure_source
+
+    class FakePicker:
+        def select_source(self, choices):
+            assert any(c.repo == "tw93/Waza" for c in choices)
+            return "tw93/Waza"
+
+        def select_skills_to_enable(self, choices):
+            names = {c.name for c in choices}
+            assert "old" in names
+            assert "active" in names
+            return ["old"]
+
+        def select_skills_to_disable(self, names):
+            raise AssertionError("not used")
+
+    upstream = make_source_repo("waza", {".archive/old": ARCHIVED, "skills/active": ACTIVE})
+    project = tmp_path / "proj"
+    project.mkdir()
+    cache = tmp_path / "repos"
+    gconfig = tmp_path / "config.json"
+    skills_dir = project / ".agents" / "skills"
+    cfg = GlobalConfig()
+    ensure_source("tw93/Waza", cfg, cache, url=f"file://{upstream}")
+    save_global_config(gconfig, cfg)
     _write_config(project, [])
-    monkeypatch.chdir(project)
-    from skill_manager import paths
 
-    cache_repo = paths.repos_cache_dir() / "tw93" / "Waza"
-    upstream = tmp_path / "sources" / "waza"
-    subprocess.run(
-        ["git", "remote", "set-url", "origin", f"file://{upstream}"],
-        cwd=cache_repo,
-        check=True,
-        capture_output=True,
+    result = run_enable(
+        project / ".skill-manager.json",
+        gconfig,
+        cache,
+        skills_dir,
+        include_all=True,
+        url_resolver=lambda _r: f"file://{upstream}",
+        picker=FakePicker(),
     )
-
-    # Menu order is sorted by path via walk; select repo 1, then the archived skill.
-    # Discover labels from a dry scan via available-skills --all.
-    listed = runner.invoke(app, ["--json", "source", "available-skills", "--all"])
-    skills = _parse_json(listed)["data"]["skills"]
-    labels = [f"{s['name']}  ({s['path']})" for s in skills]
-    old_idx = next(i for i, lab in enumerate(labels, 1) if "old" in lab)
-
-    answers = iter(["1", str(old_idx)])
-    monkeypatch.setattr("builtins.input", lambda prompt="": next(answers))
-    result = runner.invoke(app, ["enable", "--all"])
-    assert result.exit_code == 0, result.output
+    assert [o.skill["name"] for o in result.outcomes] == ["old"]
     proj = load_skill_declarations(project / ".skill-manager.json")
     assert any(s.name == "old" and s.path == ".archive/old" for s in proj.skills)
 
@@ -453,7 +477,7 @@ def test_json_available_skills_simple_layout_unchanged(tmp_path: Path, make_sour
     _seed_cached_source(
         tmp_path,
         make_source_repo,
-        {"skills/read": "# r\n", "skills/write": "# w\n"},
+        {"skills/read": skill_md("read"), "skills/write": skill_md("write")},
     )
     result = runner.invoke(app, ["--json", "source", "available-skills"])
     assert result.exit_code == 0, result.output
