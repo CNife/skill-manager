@@ -1,0 +1,59 @@
+{
+  "skills": [
+    {
+      "name": "domain-modeling",
+      "path": "skills/engineering/domain-modeling",
+      "repo": "mattpocock/skills"
+    },
+    {
+      "name": "grill-with-docs",
+      "path": "skills/engineering/grill-with-docs",
+      "repo": "mattpocock/skills"
+    },
+    {
+      "name": "implement",
+      "path": "skills/engineering/implement",
+      "repo": "mattpocock/skills"
+    },
+    {
+      "name": "prototype",
+      "path": "skills/engineering/prototype",
+      "repo": "mattpocock/skills"
+    },
+    {
+      "name": "research",
+      "path": "skills/engineering/research",
+      "repo": "mattpocock/skills"
+    },
+    {
+      "name": "tdd",
+      "path": "skills/engineering/tdd",
+      "repo": "mattpocock/skills"
+    },
+    {
+      "name": "to-spec",
+      "path": "skills/engineering/to-spec",
+      "repo": "mattpocock/skills"
+    },
+    {
+      "name": "to-tickets",
+      "path": "skills/engineering/to-tickets",
+      "repo": "mattpocock/skills"
+    },
+    {
+      "name": "wayfinder",
+      "path": "skills/engineering/wayfinder",
+      "repo": "mattpocock/skills"
+    },
+    {
+      "name": "batch-grill-me",
+      "path": "skills/in-progress/batch-grill-me",
+      "repo": "mattpocock/skills"
+    },
+    {
+      "name": "grilling",
+      "path": "skills/productivity/grilling",
+      "repo": "mattpocock/skills"
+    }
+  ]
+}
