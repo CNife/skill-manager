@@ -247,8 +247,8 @@ def test_run_enable_duplicate(
 
     monkeypatch.setattr("builtins.input", lambda prompt="": next(iter(["1", "1"])))
     result = run_enable(project / ".skill-manager.json", gconfig, cache, skills_dir)
-    assert result.action == "already_enabled"
-    assert result.skill["name"] == "read"
+    assert [o.action for o in result.outcomes] == ["already_enabled"]
+    assert result.outcomes[0].skill["name"] == "read"
     assert result.sync is None
 
 
@@ -285,10 +285,10 @@ def test_run_enable_bootstraps_missing_project_config(tmp_path: Path, make_sourc
         cache,
         skills_dir,
         repo="tw93/Waza",
-        name="read",
+        names=["read"],
         url_resolver=lambda _r: f"file://{_upstream}",
     )
-    assert result.action == "enabled"
+    assert result.outcomes[0].action == "enabled"
     assert (project / ".skill-manager.json").is_file()
     proj = load_skill_declarations(project / ".skill-manager.json")
     assert proj.skills == [SkillRef("read", "tw93/Waza", "skills/read")]
@@ -309,10 +309,10 @@ def test_run_enable_bootstraps_empty_project_config(tmp_path: Path, make_source_
         cache,
         skills_dir,
         repo="tw93/Waza",
-        name="read",
+        names=["read"],
         url_resolver=lambda _r: f"file://{_upstream}",
     )
-    assert result.action == "enabled"
+    assert result.outcomes[0].action == "enabled"
     proj = load_skill_declarations(project / ".skill-manager.json")
     assert proj.skills == [SkillRef("read", "tw93/Waza", "skills/read")]
 
@@ -332,7 +332,7 @@ def test_run_enable_rejects_invalid_project_config(tmp_path: Path, make_source_r
             cache,
             skills_dir,
             repo="tw93/Waza",
-            name="read",
+            names=["read"],
         )
 
 

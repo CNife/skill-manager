@@ -266,8 +266,8 @@ def test_json_enable_all_resolves_filtered_skill(
     assert result.exit_code == 0, result.output
     body = _parse_json(result)
     assert body["ok"] is True
-    assert body["data"]["action"] == "enabled"
-    assert body["data"]["skill"] == {
+    assert body["data"]["results"][0]["action"] == "enabled"
+    assert body["data"]["results"][0]["skill"] == {
         "name": "old",
         "repo": "tw93/Waza",
         "path": ".archive/old",
@@ -299,7 +299,7 @@ def test_json_enable_all_resolves_internal(
     result = runner.invoke(app, ["--json", "enable", "--all", "tw93/Waza", "secret"])
     assert result.exit_code == 0, result.output
     body = _parse_json(result)
-    assert body["data"]["skill"]["path"] == "skills/secret"
+    assert body["data"]["results"][0]["skill"]["path"] == "skills/secret"
 
 
 def test_json_enable_missing_name_still_hints_when_filtered(
@@ -442,7 +442,7 @@ def test_enable_already_enabled_filtered_path_idempotent(
     result = runner.invoke(app, ["--json", "enable", "tw93/Waza", "old"])
     assert result.exit_code == 0, result.output
     body = _parse_json(result)
-    assert body["data"]["action"] == "already_enabled"
+    assert body["data"]["results"][0]["action"] == "already_enabled"
     assert (project / ".skill-manager.json").read_text() == before
 
 
