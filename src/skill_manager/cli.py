@@ -272,7 +272,7 @@ def run_sync(
     Always returns a ``SyncResult`` for structured consumers.
     """
     resolver = url_resolver or sources.repo_url
-    proj = config.load_project_config(project_config)
+    proj = config.load_skill_declarations(project_config)
     repos = config.derived_sources(proj)
     global_cfg = config.load_global_config(global_config_path)
     result = SyncResult()
@@ -312,7 +312,7 @@ def run_list(
     skills_dir: Path,
 ) -> ListResult:
     """Collect declared skills with link status (and human-only source rows)."""
-    proj = config.load_project_config(project_config)
+    proj = config.load_skill_declarations(project_config)
     global_cfg = config.load_global_config(global_config_path)
     source_rows: list[tuple[str, str, str]] = []
     for repo in config.derived_sources(proj):
@@ -561,7 +561,7 @@ def _enable_noninteractive(
     url_resolver: Callable[[str], str] | None,
     emit: Callable[[str], None] | None,
 ) -> EnableResult:
-    proj = config.load_project_config(project_config)
+    proj = config.load_skill_declarations(project_config)
     existing = next((s for s in proj.skills if s.name == name), None)
     if existing is not None:
         # Idempotent early return: no sync, no cache validation.
@@ -614,7 +614,7 @@ def _enable_apply(
     url_resolver: Callable[[str], str] | None,
     emit: Callable[[str], None] | None,
 ) -> EnableResult:
-    proj = config.load_project_config(project_config)
+    proj = config.load_skill_declarations(project_config)
     existing = next((s for s in proj.skills if s.name == name), None)
     if existing is not None:
         _emit(emit, f"Skill {name!r} already enabled")
@@ -624,7 +624,7 @@ def _enable_apply(
         )
 
     proj.skills.append(SkillRef(name=name, repo=repo, path=skill_path))
-    config.save_project_config(project_config, proj)
+    config.save_skill_declarations(project_config, proj)
     _emit(emit, f"Added {name} ({repo}:{skill_path}) to {project_config}")
 
     sync_result = run_sync(
@@ -652,7 +652,7 @@ def run_disable(
     emit: Callable[[str], None] | None = None,
 ) -> DisableResult:
     """Disable a skill interactively (name is None) or non-interactively."""
-    proj = config.load_project_config(project_config)
+    proj = config.load_skill_declarations(project_config)
 
     if name is None:
         if not proj.skills:
@@ -680,9 +680,9 @@ def _disable_apply(
     *,
     emit: Callable[[str], None] | None,
 ) -> DisableResult:
-    proj = config.load_project_config(project_config)
+    proj = config.load_skill_declarations(project_config)
     proj.skills = [s for s in proj.skills if s.name != skill.name]
-    config.save_project_config(project_config, proj)
+    config.save_skill_declarations(project_config, proj)
     _emit(emit, f"Removed {skill.name} from {project_config}")
 
     link = skills_dir / skill.name
@@ -935,7 +935,7 @@ def source_remove(ctx: typer.Context, repo: str) -> None:
         if repo not in global_cfg.sources:
             raise NotFoundError(f"source {repo!r} not found")
         try:
-            proj_cfg = config.load_project_config(paths.project_config_path())
+            proj_cfg = config.load_skill_declarations(paths.project_config_path())
         except ConfigError:
             proj_cfg = None  # not in a project dir, skip warning
         if (

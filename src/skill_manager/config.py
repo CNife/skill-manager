@@ -23,7 +23,7 @@ class SkillRef:
 
 
 @dataclass
-class ProjectConfig:
+class SkillDeclarations:
     skills: list[SkillRef]
 
 
@@ -39,7 +39,7 @@ class GlobalConfig:
     sources: dict[str, Source] = field(default_factory=dict)
 
 
-def derived_sources(config: ProjectConfig) -> list[str]:
+def derived_sources(config: SkillDeclarations) -> list[str]:
     """Unique repo identifiers from a project config, in first-seen order."""
     seen: set[str] = set()
     repos: list[str] = []
@@ -124,7 +124,7 @@ def _check_duplicate_names(skills: list[SkillRef], path: Path) -> None:
         seen.add(skill.name)
 
 
-def load_project_config(path: Path) -> ProjectConfig:
+def load_skill_declarations(path: Path) -> SkillDeclarations:
     if not path.is_file():
         raise ConfigError(f"project config not found: {path}")
     try:
@@ -140,7 +140,7 @@ def load_project_config(path: Path) -> ProjectConfig:
         raise ConfigError(f"project config missing 'skills' list in {path}")
     skills = [_parse_skill(item, path) for item in skills_raw]
     _check_duplicate_names(skills, path)
-    return ProjectConfig(skills=skills)
+    return SkillDeclarations(skills=skills)
 
 
 def load_global_config(path: Path) -> GlobalConfig:
@@ -179,11 +179,11 @@ def save_global_config(path: Path, config: GlobalConfig) -> None:
     path.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
-def save_project_config(path: Path, config: ProjectConfig) -> None:
-    """Save a ProjectConfig back to a JSON file.
+def save_skill_declarations(path: Path, config: SkillDeclarations) -> None:
+    """Save a SkillDeclarations back to a JSON file.
 
     Creates parent directories if they don't exist. Uses the same JSON
-    shape as load_project_config expects.
+    shape as load_skill_declarations expects.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     data = {"skills": [{"name": s.name, "repo": s.repo, "path": s.path} for s in config.skills]}
