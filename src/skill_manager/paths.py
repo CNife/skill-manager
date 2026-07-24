@@ -50,3 +50,18 @@ def project_skills_dir(project_dir: Path | None = None) -> Path:
     """Path to the project's skill link directory (``./.agents/skills/``)."""
     base = Path(project_dir) if project_dir is not None else Path.cwd()
     return base / ".agents" / "skills"
+
+
+def global_skills_config_path() -> Path:
+    """Path to the user-global skills declaration file (``~/.skill-manager.json``).
+
+    Same shape as a project config; the user's home is treated as the global
+    "project". Sources and the cache remain shared via :func:`config_file` and
+    :func:`repos_cache_dir`.
+    """
+    return Path.home() / ".skill-manager.json"
+
+
+def global_skills_dir() -> Path:
+    """Path to the user-global skill link directory (``~/.agents/skills/``)."""
+    return Path.home() / ".agents" / "skills"

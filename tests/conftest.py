@@ -14,9 +14,16 @@ import pytest
 
 @pytest.fixture(autouse=True)
 def isolated_xdg(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Redirect XDG dirs to tmp so tests never touch real ~/.config or ~/.cache."""
+    """Redirect XDG dirs and HOME to tmp so tests never touch real user state.
+
+    HOME isolation matters for global-scope tests: ``~/.skill-manager.json`` and
+    ``~/.agents/skills/`` resolve under the temp HOME, never the real one.
+    """
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
     monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
 
 
 def _git(args: list[str], cwd: Path) -> None:
