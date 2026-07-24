@@ -281,3 +281,24 @@ def test_global_flag_ignored_on_source_subcommand(tmp_path: Path, make_source_re
     result = runner.invoke(app, ["--global", "source", "list"])
     assert result.exit_code == 0, result.output
     assert "tw93/Waza" in result.output
+
+
+# ── source remove from ~: no double-count ─────────────────────────────────────
+
+
+def test_source_remove_from_home_no_double_count(
+    tmp_path: Path, make_source_repo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """From ~ the project and global declaration files coincide; warn once as global."""
+    _seed_source(tmp_path, make_source_repo)
+    _write_decls(
+        paths.global_skills_config_path(),
+        [{"name": "read", "repo": "tw93/Waza", "path": "skills/read"}],
+    )
+    monkeypatch.chdir(paths.global_skills_config_path().parent)  # cwd = HOME
+    result = runner.invoke(app, ["source", "remove", "tw93/Waza"])
+    assert result.exit_code == 0, result.output
+    assert "still referenced" in result.output
+    assert "global" in result.output
+    # the home/global declaration is one file, not double-counted as project + global
+    assert "project, global" not in result.output

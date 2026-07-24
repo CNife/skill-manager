@@ -193,33 +193,44 @@ def _scope_paths(ctx: typer.Context) -> tuple[Path, Path]:
 
 
 def _referencing_scopes(repo: str) -> list[str]:
-    """Scope labels whose skill declarations reference ``repo`` (project, then global)."""
+    """Scope labels whose skill declarations reference ``repo``.
+
+    Checks the project declaration (cwd) and the global declaration (``~``),
+    deduping by resolved path: when the project cwd is the user's home the two
+    files coincide and are reported once, labelled ``global``.
+    """
     scopes: list[str] = []
-    for label, path in (
-        ("project", paths.project_config_path()),
-        ("global", paths.global_skills_config_path()),
-    ):
+    seen: set[Path] = set()
+    global_path = paths.global_skills_config_path().resolve()
+    for path in (paths.project_config_path(), global_path):
+        resolved = path.resolve()
+        if resolved in seen:
+            continue
+        seen.add(resolved)
         try:
             decl = config.load_skill_declarations(path)
         except ConfigError:
             continue
         if any(s.repo == repo for s in decl.skills):
-            scopes.append(label)
+            scopes.append("global" if resolved == global_path else "project")
     return scopes
 
 
-def _load_declarations_or_empty(path: Path) -> config.SkillDeclarations:
-    """Load skill declarations, treating a missing file as empty.
+def _load_declarations_for_enable(path: Path) -> config.SkillDeclarations:
+    """Load declarations for ``enable``, bootstrapping only the global file.
 
-    ``enable`` adds a declaration, so a missing file (e.g. a fresh
-    ``~/.skill-manager.json``) is equivalent to no declarations yet rather than
-    an error. ``sync``/``list`` stay strict: a missing project config still means
-    "not in a project".
+    A missing ``~/.skill-manager.json`` is treated as empty so the first
+    ``--global enable`` works without a hand-edited file. Project configs stay
+    strict: a missing ``./.skill-manager.json`` still means "not in a project".
+    When the project cwd is the user's home, the project path coincides with
+    the global path and is treated as global.
     """
-    try:
-        return config.load_skill_declarations(path)
-    except ConfigError:
-        return config.SkillDeclarations(skills=[])
+    if path.resolve() == paths.global_skills_config_path().resolve():
+        try:
+            return config.load_skill_declarations(path)
+        except ConfigError:
+            return config.SkillDeclarations(skills=[])
+    return config.load_skill_declarations(path)
 
 
 def _emit_json(payload: dict[str, Any]) -> None:
@@ -611,7 +622,7 @@ def _enable_noninteractive(
     url_resolver: Callable[[str], str] | None,
     emit: Callable[[str], None] | None,
 ) -> EnableResult:
-    proj = _load_declarations_or_empty(project_config)
+    proj = _load_declarations_for_enable(project_config)
     existing = next((s for s in proj.skills if s.name == name), None)
     if existing is not None:
         # Idempotent early return: no sync, no cache validation.
@@ -664,7 +675,7 @@ def _enable_apply(
     url_resolver: Callable[[str], str] | None,
     emit: Callable[[str], None] | None,
 ) -> EnableResult:
-    proj = _load_declarations_or_empty(project_config)
+    proj = _load_declarations_for_enable(project_config)
     existing = next((s for s in proj.skills if s.name == name), None)
     if existing is not None:
         _emit(emit, f"Skill {name!r} already enabled")

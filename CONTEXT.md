@@ -25,7 +25,7 @@ XDG 配置文件（默认 `~/.config/skill-manager/config.json`），记录各 S
 _Avoid_: ledger, database, 台账
 
 **Global skills declaration / 全局技能声明**:
-`~/.skill-manager.json`，声明用户全局启用哪些 Skill；与项目配置同形（`{skills:[...]}`）。与 Global config（源注册表）区分：本文件只存技能声明。
+`~/.skill-manager.json`，声明用户全局启用哪些 Skill；与项目配置同形（`{skills:[...]}`）。与 Global config 区分：本文件只存技能声明。
 _Avoid_: global config, user manifest
 
 **Scope / 作用域**:
