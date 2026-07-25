@@ -43,6 +43,13 @@ class SkillChoice:
     path: str
     description: str
     locked: bool = False
+    # Same name is present in the global skills declaration (project scope only).
+    enabled_globally: bool = False
+
+
+def skill_enable_title(name: str, *, enabled_globally: bool = False) -> str:
+    """Human title for an enable row: optional ``⊕ `` prefix, then name."""
+    return f"⊕ {name}" if enabled_globally else name
 
 
 class Picker(Protocol):
@@ -139,6 +146,7 @@ def _q_style():
             ("instruction", "fg:ansibrightblack"),
             ("text", ""),
             ("disabled", "fg:ansibrightblack italic"),
+            ("proj-locked", "fg:ansiblack bg:ansigreen"),
             ("description", "fg:ansibrightblack"),
             ("search_success", "fg:cyan"),
             ("search_none", "fg:red"),
@@ -199,11 +207,14 @@ def _make_inline_control():
                     tokens.append(("class:separator", f"{choice.title}"))
                     line_used += display_width(str(choice.title))
                 elif choice.disabled:
-                    reason = "" if isinstance(choice.disabled, bool) else f" ({choice.disabled})"
+                    # Project-locked: green-bg ✓ replaces checkbox; title may carry ⊕.
                     title = choice.title if isinstance(choice.title, str) else str(choice.title)
-                    body = f"- {title}{reason}"
-                    tokens.append(("class:disabled", body))
-                    line_used += display_width(body)
+                    mark = " ✓ "
+                    tokens.append(("class:proj-locked", mark))
+                    tokens.append(("class:text", " "))
+                    name_cls = "class:highlighted" if pointed else "class:disabled"
+                    tokens.append((name_cls, title))
+                    line_used += display_width(mark + " " + title)
                 else:
                     shortcut = choice.get_shortcut_title() if self.use_shortcuts else ""
                     if self.use_indicator:
@@ -499,12 +510,13 @@ class QuestionaryPicker:
         style = _q_style()
         q_choices = []
         for c in choices:
+            title = skill_enable_title(c.name, enabled_globally=c.enabled_globally)
             if c.locked:
                 q_choices.append(
                     Choice(
-                        title=c.name,
+                        title=title,
                         value=c.name,
-                        disabled="already enabled",
+                        disabled=True,
                         checked=True,
                         description=c.description or None,
                     )
@@ -512,7 +524,7 @@ class QuestionaryPicker:
             else:
                 q_choices.append(
                     Choice(
-                        title=c.name,
+                        title=title,
                         value=c.name,
                         description=c.description or None,
                     )
@@ -521,7 +533,9 @@ class QuestionaryPicker:
             _qa_checkbox(
                 "Enable skills",
                 q_choices,
-                instruction="(type · ↑↓ · space · enter · Esc/Ctrl-C) ",
+                instruction=(
+                    "(✓ green=project locked · ⊕=global · type · ↑↓ · space · enter · Esc/Ctrl-C) "
+                ),
                 style=style,
                 show_description=True,
             )

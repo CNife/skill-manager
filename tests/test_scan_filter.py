@@ -448,6 +448,7 @@ def test_sync_and_list_honor_declared_filtered_path(
             "repo": "tw93/Waza",
             "path": ".archive/old",
             "link": "linked",
+            "enabled_globally": False,
         }
     ]
 

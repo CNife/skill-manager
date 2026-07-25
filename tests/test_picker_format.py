@@ -52,14 +52,14 @@ def test_inline_control_constructs_when_all_choices_locked() -> None:
             Choice(
                 title="alpha",
                 value="alpha",
-                disabled="already enabled",
+                disabled=True,
                 checked=True,
                 description="First",
             ),
             Choice(
                 title="bravo",
                 value="bravo",
-                disabled="already enabled",
+                disabled=True,
                 checked=True,
                 description="Second",
             ),
@@ -87,7 +87,7 @@ def test_qa_checkbox_builds_question_when_all_locked() -> None:
             Choice(
                 title="only",
                 value="only",
-                disabled="already enabled",
+                disabled=True,
                 checked=True,
                 description="Already on",
             ),
@@ -97,3 +97,74 @@ def test_qa_checkbox_builds_question_when_all_locked() -> None:
         show_description=True,
     )
     assert q is not None
+
+
+def test_skill_enable_title_prefix() -> None:
+    from skill_manager.picker import skill_enable_title
+
+    assert skill_enable_title("tdd") == "tdd"
+    assert skill_enable_title("tdd", enabled_globally=False) == "tdd"
+    assert skill_enable_title("grilling", enabled_globally=True) == "⊕ grilling"
+
+
+def test_locked_row_tokens_use_green_check_and_optional_global() -> None:
+    """Locked rows render ✓ (proj-locked) then title; title may carry ⊕."""
+    from questionary import Choice
+
+    from skill_manager.picker import _make_inline_control, skill_enable_title
+
+    control_cls = _make_inline_control()
+    ic = control_cls(
+        [
+            Choice(
+                title=skill_enable_title("grilling", enabled_globally=True),
+                value="grilling",
+                disabled=True,
+                checked=True,
+            ),
+            Choice(
+                title=skill_enable_title("research", enabled_globally=False),
+                value="research",
+                disabled=True,
+                checked=True,
+            ),
+        ],
+        pointer="❯",
+        use_indicator=True,
+        use_shortcuts=False,
+        show_description=False,
+        show_selected=False,
+    )
+    tokens = ic._get_choice_tokens()
+    joined = "".join(s for cls, s in tokens if isinstance(s, str))
+    assert "✓" in joined
+    assert "⊕ grilling" in joined
+    assert "research" in joined
+    # proj-locked style used for the check mark
+    assert any(cls == "class:proj-locked" and "✓" in s for cls, s in tokens if isinstance(s, str))
+    # No old prose reason
+    assert "already enabled" not in joined
+
+
+def test_unlocked_global_title_carries_oplus_only() -> None:
+    from questionary import Choice
+
+    from skill_manager.picker import _make_inline_control, skill_enable_title
+
+    control_cls = _make_inline_control()
+    ic = control_cls(
+        [
+            Choice(
+                title=skill_enable_title("domain-modeling", enabled_globally=True),
+                value="domain-modeling",
+            ),
+        ],
+        pointer="❯",
+        use_indicator=True,
+        use_shortcuts=False,
+        show_description=False,
+        show_selected=False,
+    )
+    joined = "".join(s for cls, s in ic._get_choice_tokens() if isinstance(s, str))
+    assert "⊕ domain-modeling" in joined
+    assert "✓" not in joined

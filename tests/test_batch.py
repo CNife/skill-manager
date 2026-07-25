@@ -350,7 +350,11 @@ def test_json_enable_single_uses_results_wrapper(
     assert result.exit_code == 0, result.output
     data = _parse_json(result)["data"]
     assert data["results"] == [
-        {"action": "enabled", "skill": {"name": "read", "repo": "tw93/Waza", "path": "skills/read"}}
+        {
+            "action": "enabled",
+            "skill": {"name": "read", "repo": "tw93/Waza", "path": "skills/read"},
+            "enabled_globally": False,
+        }
     ]
     assert "sync" in data
 
