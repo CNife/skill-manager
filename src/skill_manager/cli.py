@@ -686,15 +686,18 @@ def _enable_interactive(
 
     proj = _load_declarations_for_enable(project_config)
     locked = {s.name for s in proj.skills}
-    skill_choices = [
-        SkillChoice(
-            name=s.name,
-            path=s.path,
-            description=s.description,
-            locked=s.name in locked,
-        )
-        for s in skills
-    ]
+    skill_choices = sorted(
+        [
+            SkillChoice(
+                name=s.name,
+                path=s.path,
+                description=s.description,
+                locked=s.name in locked,
+            )
+            for s in skills
+        ],
+        key=lambda c: c.name,
+    )
     selected_names = ui.select_skills_to_enable(skill_choices)
 
     # Map selected names to first matching path in scan order; skip locked;
@@ -873,7 +876,7 @@ def run_disable(
             _emit(emit, "No enabled skills to disable.")
             return DisableResult(outcomes=[])
         ui = _resolve_picker(picker, command="disable")
-        ordered_names = ui.select_skills_to_disable([s.name for s in proj.skills])
+        ordered_names = ui.select_skills_to_disable(sorted(s.name for s in proj.skills))
         if not ordered_names:
             _emit(emit, "Nothing to disable.")
             return DisableResult(outcomes=[])

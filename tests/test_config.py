@@ -180,13 +180,32 @@ def test_save_skill_declarations_roundtrip(tmp_path: Path) -> None:
     p = tmp_path / ".skill-manager.json"
     cfg = SkillDeclarations(
         skills=[
-            SkillRef("read", "tw93/Waza", "skills/read"),
             SkillRef("kami", "tw93/Kami", "."),
+            SkillRef("read", "tw93/Waza", "skills/read"),
         ]
     )
     save_skill_declarations(p, cfg)
     loaded = load_skill_declarations(p)
     assert loaded.skills == cfg.skills
+
+
+def test_save_skill_declarations_sorts_by_name(tmp_path: Path) -> None:
+    """Saved skills are ordered by name regardless of input order."""
+    p = tmp_path / ".skill-manager.json"
+    cfg = SkillDeclarations(
+        skills=[
+            SkillRef("write", "tw93/Waza", "skills/write"),
+            SkillRef("kami", "tw93/Kami", "."),
+            SkillRef("read", "tw93/Waza", "skills/read"),
+        ]
+    )
+    save_skill_declarations(p, cfg)
+    loaded = load_skill_declarations(p)
+    assert [s.name for s in loaded.skills] == ["kami", "read", "write"]
+    # Pretty-printed with trailing newline for hand editing.
+    text = p.read_text(encoding="utf-8")
+    assert text.endswith("\n")
+    assert '  "skills": [' in text
 
 
 def test_save_skill_declarations_creates_parent_dir(tmp_path: Path) -> None:
