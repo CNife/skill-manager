@@ -182,9 +182,11 @@ def save_global_config(path: Path, config: GlobalConfig) -> None:
 def save_skill_declarations(path: Path, config: SkillDeclarations) -> None:
     """Save a SkillDeclarations back to a JSON file.
 
-    Creates parent directories if they don't exist. Uses the same JSON
-    shape as load_skill_declarations expects.
+    Creates parent directories if they don't exist. Skills are written sorted
+    by name for a stable, hand-editable file. Uses the same JSON shape as
+    load_skill_declarations expects (indent=2, trailing newline).
     """
     path.parent.mkdir(parents=True, exist_ok=True)
-    data = {"skills": [{"name": s.name, "repo": s.repo, "path": s.path} for s in config.skills]}
+    skills = sorted(config.skills, key=lambda s: s.name)
+    data = {"skills": [{"name": s.name, "repo": s.repo, "path": s.path} for s in skills]}
     path.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")

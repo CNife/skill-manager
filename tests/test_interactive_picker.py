@@ -52,6 +52,7 @@ class FakePicker:
         cancel_on: str | None = None,
         source_choices_out: list | None = None,
         enable_choices_out: list | None = None,
+        disable_names_out: list | None = None,
     ) -> None:
         self.source = source
         self.enable_names = enable_names
@@ -59,6 +60,7 @@ class FakePicker:
         self.cancel_on = cancel_on
         self.source_choices_out = source_choices_out
         self.enable_choices_out = enable_choices_out
+        self.disable_names_out = disable_names_out
 
     def select_source(self, choices: list[SourceChoice]) -> str:
         if self.source_choices_out is not None:
@@ -76,6 +78,8 @@ class FakePicker:
         return list(self.enable_names or [])
 
     def select_skills_to_disable(self, names: list[str]) -> list[str]:
+        if self.disable_names_out is not None:
+            self.disable_names_out.append(list(names))
         if self.cancel_on == "disable":
             raise PickerCancelled
         return list(self.disable_names if self.disable_names is not None else names)
@@ -173,9 +177,38 @@ def test_enable_selects_and_syncs_once(tmp_path: Path, make_source_repo) -> None
     assert [o.skill["name"] for o in result.outcomes] == ["write", "read"]
     assert result.sync is not None
     proj = load_skill_declarations(project / ".skill-manager.json")
-    assert {s.name for s in proj.skills} == {"read", "write"}
+    # Saved list is sorted by skill name, not selection order.
+    assert [s.name for s in proj.skills] == ["read", "write"]
     assert (skills_dir / "read").is_symlink()
     assert (skills_dir / "write").is_symlink()
+
+
+def test_enable_picker_skills_sorted_by_name(tmp_path: Path, make_source_repo) -> None:
+    """Enable TUI presents skills sorted by name."""
+    project, cache, gconfig, skills_dir, upstream = _env(
+        tmp_path,
+        make_source_repo,
+        {
+            "skills/zeta": skill_md("zeta", "Z"),
+            "skills/alpha": skill_md("alpha", "A"),
+            "skills/mu": skill_md("mu", "M"),
+        },
+    )
+    _write_config(project, [])
+    choices_out: list = []
+    run_enable(
+        project / ".skill-manager.json",
+        gconfig,
+        cache,
+        skills_dir,
+        url_resolver=lambda _r: f"file://{upstream}",
+        picker=FakePicker(
+            source="tw93/Waza",
+            enable_names=[],
+            enable_choices_out=choices_out,
+        ),
+    )
+    assert [c.name for c in choices_out[0]] == ["alpha", "mu", "zeta"]
 
 
 def test_enable_unqualified_enabled_absent_from_list(tmp_path: Path, make_source_repo) -> None:
@@ -345,3 +378,25 @@ def test_disable_includes_stale_unqualified_declaration(tmp_path: Path, make_sou
         picker=Capture(disable_names=[]),
     )
     assert seen == ["stale"]
+
+
+def test_disable_picker_names_sorted_by_name(tmp_path: Path, make_source_repo) -> None:
+    """Disable TUI presents enabled skills sorted by name."""
+    project, cache, gconfig, skills_dir, _upstream = _env(tmp_path, make_source_repo)
+    _write_config(
+        project,
+        [
+            {"name": "write", "repo": "tw93/Waza", "path": "skills/write"},
+            {"name": "kami", "repo": "tw93/Waza", "path": "skills/kami"},
+            {"name": "read", "repo": "tw93/Waza", "path": "skills/read"},
+        ],
+    )
+    names_out: list = []
+    run_disable(
+        project / ".skill-manager.json",
+        gconfig,
+        cache,
+        skills_dir,
+        picker=FakePicker(disable_names=[], disable_names_out=names_out),
+    )
+    assert names_out[0] == ["kami", "read", "write"]
