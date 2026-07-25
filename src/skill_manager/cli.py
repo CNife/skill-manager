@@ -737,7 +737,11 @@ def _enable_interactive(
 
     proj = _load_declarations_for_enable(project_config)
     locked = {s.name for s in proj.skills}
-    global_names, _warnings = _load_global_enabled_hint(project_config)
+    cross_hint = _load_global_enabled_hint(project_config)
+    global_names, warnings = cross_hint
+    if warnings and emit is not None:
+        for w in warnings:
+            emit(f"Warning: {w['message']}")
     global_set = global_names or frozenset()
     skill_choices = sorted(
         [
@@ -772,7 +776,7 @@ def _enable_interactive(
 
     if not resolved:
         _emit(emit, "Nothing to enable.")
-        return EnableResult(outcomes=[], sync=None)
+        return EnableResult(outcomes=[], sync=None, warnings=warnings)
 
     return _enable_apply_batch(
         project_config,
@@ -783,6 +787,8 @@ def _enable_interactive(
         resolved=resolved,
         url_resolver=url_resolver,
         emit=emit,
+        cross_hint=cross_hint,
+        emit_hint_warnings=False,
     )
 
 
@@ -857,17 +863,25 @@ def _enable_apply_batch(
     resolved: list[tuple[str, str]],
     url_resolver: Callable[[str], str] | None,
     emit: Callable[[str], None] | None,
+    cross_hint: tuple[frozenset[str] | None, list[dict[str, str]]] | None = None,
+    emit_hint_warnings: bool = True,
 ) -> EnableResult:
     """Commit a validated, deduped batch of (name, path) skills.
 
     Already-enabled names are idempotent successes (their path entry is
     ignored); new names are appended and a single sync runs only when at least
     one skill was added.
+
+    ``cross_hint`` is the optional preloaded ``_load_global_enabled_hint`` result
+    so interactive enable can reuse one load for picker rows and apply.
     """
     proj = _load_declarations_for_enable(project_config)
     enabled = {s.name: s for s in proj.skills}
-    global_names, warnings = _load_global_enabled_hint(project_config)
-    if warnings and emit is not None:
+    if cross_hint is None:
+        global_names, warnings = _load_global_enabled_hint(project_config)
+    else:
+        global_names, warnings = cross_hint
+    if emit_hint_warnings and warnings and emit is not None:
         for w in warnings:
             emit(f"Warning: {w['message']}")
     outcomes: list[EnableOutcome] = []

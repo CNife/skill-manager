@@ -192,6 +192,31 @@ def test_enable_choices_mark_enabled_globally_by_name(tmp_path: Path, make_sourc
     assert by_name["write"].enabled_globally is True
 
 
+def test_enable_interactive_empty_still_surfaces_global_warning(
+    tmp_path: Path, make_source_repo
+) -> None:
+    """Unreadable global declaration warns even when nothing is selected."""
+    from skill_manager import paths
+
+    project, cache, gconfig, skills_dir, upstream = _env(tmp_path, make_source_repo)
+    _write_config(project, [])
+    paths.global_skills_config_path().write_text("{bad", encoding="utf-8")
+    messages: list[str] = []
+    result = run_enable(
+        project / ".skill-manager.json",
+        gconfig,
+        cache,
+        skills_dir,
+        url_resolver=lambda _r: f"file://{upstream}",
+        emit=messages.append,
+        picker=FakePicker(source="tw93/Waza", enable_names=[]),
+    )
+    assert result.outcomes == []
+    assert result.warnings
+    assert result.warnings[0]["code"] == "global_config_error"
+    assert any("Warning:" in m for m in messages)
+
+
 def test_enable_selects_and_syncs_once(tmp_path: Path, make_source_repo) -> None:
     project, cache, gconfig, skills_dir, upstream = _env(tmp_path, make_source_repo)
     _write_config(project, [])
