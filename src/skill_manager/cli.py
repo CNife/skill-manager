@@ -63,6 +63,8 @@ class SkillStatus:
     repo: str
     path: str
     link: str  # linked | broken | external | unlinked
+    # None = omit key (global scope); bool = project-scope cross-hint.
+    enabled_globally: bool | None = None
 
 
 @dataclass
@@ -71,15 +73,22 @@ class ListResult:
     # Human-only extras (not serialized to JSON data):
     source_rows: list[tuple[str, str, str]] = field(default_factory=list)
     # (repo, head8_or_dash, "cached"|"missing")
+    # Soft warnings for the JSON/human envelope (e.g. unreadable global declaration).
+    warnings: list[dict[str, str]] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
 class EnableOutcome:
     action: str  # enabled | already_enabled
     skill: dict[str, str]
+    # None = omit key (global scope); bool = project-scope cross-hint.
+    enabled_globally: bool | None = None
 
     def to_data(self) -> dict[str, Any]:
-        return {"action": self.action, "skill": self.skill}
+        data: dict[str, Any] = {"action": self.action, "skill": self.skill}
+        if self.enabled_globally is not None:
+            data["enabled_globally"] = self.enabled_globally
+        return data
 
 
 @dataclass(frozen=True)
@@ -99,6 +108,7 @@ class DisableOutcome:
 class EnableResult:
     outcomes: list[EnableOutcome] = field(default_factory=list)
     sync: SyncResult | None = None
+    warnings: list[dict[str, str]] = field(default_factory=list)
 
     def to_data(self) -> dict[str, Any]:
         data: dict[str, Any] = {"results": [o.to_data() for o in self.outcomes]}
@@ -270,9 +280,17 @@ def _emit_json(payload: dict[str, Any]) -> None:
     typer.echo(json.dumps(payload, ensure_ascii=False))
 
 
-def _success(ctx: typer.Context, data: dict[str, Any]) -> None:
+def _success(
+    ctx: typer.Context,
+    data: dict[str, Any],
+    *,
+    warnings: list[dict[str, str]] | None = None,
+) -> None:
     if _is_json(ctx):
-        _emit_json({"ok": True, "data": data})
+        payload: dict[str, Any] = {"ok": True, "data": data}
+        if warnings:
+            payload["warnings"] = warnings
+        _emit_json(payload)
 
 
 def _fail(ctx: typer.Context, code: str, message: str, exit_code: int = 1) -> None:
@@ -399,6 +417,37 @@ def _link_status(skill: SkillRef, cache_root: Path, skills_dir: Path) -> str:
     return "unlinked"
 
 
+def _is_global_scope(declaration_path: Path) -> bool:
+    """True when the active declaration is the user-global skills file.
+
+    Uses resolved paths so cwd==$HOME (home-as-project) is treated as global
+    scope even without ``--global``: there is no separate "other" scope to hint.
+    """
+    return declaration_path.resolve() == paths.global_skills_config_path().resolve()
+
+
+def _load_global_enabled_hint(
+    declaration_path: Path,
+) -> tuple[frozenset[str] | None, list[dict[str, str]]]:
+    """Load global skill names for the project→global non-blocking hint.
+
+    Returns ``(None, [])`` when the active scope *is* global (omit the field).
+    For project scope, returns ``(names, warnings)`` where missing file ≡ empty
+    names, and an unreadable/malformed global declaration yields empty names plus
+    a soft ``global_config_error`` warning (command continues).
+    """
+    if _is_global_scope(declaration_path):
+        return None, []
+    global_decl = paths.global_skills_config_path()
+    if not global_decl.is_file():
+        return frozenset(), []
+    try:
+        decl = config.load_skill_declarations(global_decl)
+    except (ConfigError, OSError, UnicodeDecodeError) as exc:
+        return frozenset(), [{"code": "global_config_error", "message": str(exc)}]
+    return frozenset(s.name for s in decl.skills), []
+
+
 def run_list(
     project_config: Path,
     global_config_path: Path,
@@ -414,16 +463,18 @@ def run_list(
         src = global_cfg.sources.get(repo)
         head = src.commit[:8] if src else "-"
         source_rows.append((repo, head, "cached" if cached else "missing"))
+    global_names, warnings = _load_global_enabled_hint(project_config)
     skill_statuses = [
         SkillStatus(
             name=skill.name,
             repo=skill.repo,
             path=skill.path,
             link=_link_status(skill, cache_root, skills_dir),
+            enabled_globally=(skill.name in global_names) if global_names is not None else None,
         )
         for skill in proj.skills
     ]
-    return ListResult(skills=skill_statuses, source_rows=source_rows)
+    return ListResult(skills=skill_statuses, source_rows=source_rows, warnings=warnings)
 
 
 def _list_cached_repos(cache_root: Path) -> list[str]:
@@ -686,6 +737,12 @@ def _enable_interactive(
 
     proj = _load_declarations_for_enable(project_config)
     locked = {s.name for s in proj.skills}
+    cross_hint = _load_global_enabled_hint(project_config)
+    global_names, warnings = cross_hint
+    if warnings and emit is not None:
+        for w in warnings:
+            emit(f"Warning: {w['message']}")
+    global_set = global_names or frozenset()
     skill_choices = sorted(
         [
             SkillChoice(
@@ -693,6 +750,7 @@ def _enable_interactive(
                 path=s.path,
                 description=s.description,
                 locked=s.name in locked,
+                enabled_globally=s.name in global_set,
             )
             for s in skills
         ],
@@ -718,7 +776,7 @@ def _enable_interactive(
 
     if not resolved:
         _emit(emit, "Nothing to enable.")
-        return EnableResult(outcomes=[], sync=None)
+        return EnableResult(outcomes=[], sync=None, warnings=warnings)
 
     return _enable_apply_batch(
         project_config,
@@ -729,6 +787,8 @@ def _enable_interactive(
         resolved=resolved,
         url_resolver=url_resolver,
         emit=emit,
+        cross_hint=cross_hint,
+        emit_hint_warnings=False,
     )
 
 
@@ -803,33 +863,53 @@ def _enable_apply_batch(
     resolved: list[tuple[str, str]],
     url_resolver: Callable[[str], str] | None,
     emit: Callable[[str], None] | None,
+    cross_hint: tuple[frozenset[str] | None, list[dict[str, str]]] | None = None,
+    emit_hint_warnings: bool = True,
 ) -> EnableResult:
     """Commit a validated, deduped batch of (name, path) skills.
 
     Already-enabled names are idempotent successes (their path entry is
     ignored); new names are appended and a single sync runs only when at least
     one skill was added.
+
+    ``cross_hint`` is the optional preloaded ``_load_global_enabled_hint`` result
+    so interactive enable can reuse one load for picker rows and apply.
     """
     proj = _load_declarations_for_enable(project_config)
     enabled = {s.name: s for s in proj.skills}
+    if cross_hint is None:
+        global_names, warnings = _load_global_enabled_hint(project_config)
+    else:
+        global_names, warnings = cross_hint
+    if emit_hint_warnings and warnings and emit is not None:
+        for w in warnings:
+            emit(f"Warning: {w['message']}")
     outcomes: list[EnableOutcome] = []
     added = 0
     for skill_name, skill_path in resolved:
+        hint = (skill_name in global_names) if global_names is not None else None
         existing = enabled.get(skill_name)
         if existing is not None:
             _emit(emit, f"Skill {skill_name!r} already enabled")
+            if hint:
+                _emit(emit, f"Skill {skill_name!r} also enabled globally")
             outcomes.append(
                 EnableOutcome(
                     action="already_enabled",
                     skill={"name": existing.name, "repo": existing.repo, "path": existing.path},
+                    enabled_globally=hint,
                 )
             )
             continue
         proj.skills.append(SkillRef(name=skill_name, repo=repo, path=skill_path))
         _emit(emit, f"Added {skill_name} ({repo}:{skill_path}) to {project_config}")
+        if hint:
+            _emit(emit, f"Skill {skill_name!r} also enabled globally")
         outcomes.append(
             EnableOutcome(
-                action="enabled", skill={"name": skill_name, "repo": repo, "path": skill_path}
+                action="enabled",
+                skill={"name": skill_name, "repo": repo, "path": skill_path},
+                enabled_globally=hint,
             )
         )
         added += 1
@@ -845,7 +925,7 @@ def _enable_apply_batch(
             url_resolver=url_resolver,
             emit=emit,
         )
-    return EnableResult(outcomes=outcomes, sync=sync_result)
+    return EnableResult(outcomes=outcomes, sync=sync_result, warnings=warnings)
 
 
 def run_disable(
@@ -1013,31 +1093,42 @@ def list_(ctx: typer.Context) -> None:
             skills_dir,
         )
         if _is_json(ctx):
-            _success(
-                ctx,
-                {
-                    "skills": [
-                        {
-                            "name": s.name,
-                            "repo": s.repo,
-                            "path": s.path,
-                            "link": s.link,
-                        }
-                        for s in result.skills
-                    ]
-                },
-            )
+            skills_payload: list[dict[str, Any]] = []
+            for s in result.skills:
+                row: dict[str, Any] = {
+                    "name": s.name,
+                    "repo": s.repo,
+                    "path": s.path,
+                    "link": s.link,
+                }
+                if s.enabled_globally is not None:
+                    row["enabled_globally"] = s.enabled_globally
+                skills_payload.append(row)
+            _success(ctx, {"skills": skills_payload}, warnings=result.warnings or None)
         else:
+            for w in result.warnings:
+                typer.echo(f"Warning: {w['message']}", err=True)
             typer.echo("Sources:")
             for repo, head, status in result.source_rows:
                 typer.echo(f"  {repo}  {head}  {status}")
             typer.echo("Skills:")
+            # Legend + name-column pad only when at least one row is also global.
+            show_global_legend = any(s.enabled_globally for s in result.skills)
+            if show_global_legend:
+                typer.echo("  (⊕ = enabled globally)")
             for s in result.skills:
                 # Human view keeps present/absent of source path (JSON omits it).
                 target_path = (paths.repos_cache_dir() / s.repo / s.path).resolve()
                 repo_present = target_path.is_dir()
+                # Project list: ⊕ before name when also global; pad peers for alignment.
+                if s.enabled_globally:
+                    name_cell = f"⊕ {s.name}"
+                elif show_global_legend:
+                    name_cell = f"  {s.name}"
+                else:
+                    name_cell = s.name
                 typer.echo(
-                    f"  {s.name}  {s.repo}:{s.path}  "
+                    f"  {name_cell}  {s.repo}:{s.path}  "
                     f"{s.link}  {'present' if repo_present else 'absent'}"
                 )
     except (ConfigError, SourceError, LinkError, NotFoundError, UsageError) as e:
@@ -1083,7 +1174,7 @@ def enable(
             emit=emit,
         )
         if _is_json(ctx):
-            _success(ctx, result.to_data())
+            _success(ctx, result.to_data(), warnings=result.warnings or None)
         # Text mode: progress / status lines already streamed via emit.
     except PickerCancelled:
         if not _is_json(ctx):

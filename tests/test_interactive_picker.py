@@ -162,6 +162,61 @@ def test_enable_locked_and_empty_submit(tmp_path: Path, make_source_repo) -> Non
     assert locked["write"] is False
 
 
+def test_enable_choices_mark_enabled_globally_by_name(tmp_path: Path, make_source_repo) -> None:
+    """Interactive enable passes enabled_globally on SkillChoice (name match)."""
+    from skill_manager import paths
+
+    project, cache, gconfig, skills_dir, upstream = _env(tmp_path, make_source_repo)
+    _write_config(project, [{"name": "read", "repo": "tw93/Waza", "path": "skills/read"}])
+    paths.global_skills_config_path().write_text(
+        json.dumps({"skills": [{"name": "write", "repo": "other/Repo", "path": "skills/write"}]}),
+        encoding="utf-8",
+    )
+    choices_out: list = []
+    run_enable(
+        project / ".skill-manager.json",
+        gconfig,
+        cache,
+        skills_dir,
+        url_resolver=lambda _r: f"file://{upstream}",
+        picker=FakePicker(
+            source="tw93/Waza",
+            enable_names=[],
+            enable_choices_out=choices_out,
+        ),
+    )
+    by_name = {c.name: c for c in choices_out[0]}
+    assert by_name["read"].locked is True
+    assert by_name["read"].enabled_globally is False
+    assert by_name["write"].locked is False
+    assert by_name["write"].enabled_globally is True
+
+
+def test_enable_interactive_empty_still_surfaces_global_warning(
+    tmp_path: Path, make_source_repo
+) -> None:
+    """Unreadable global declaration warns even when nothing is selected."""
+    from skill_manager import paths
+
+    project, cache, gconfig, skills_dir, upstream = _env(tmp_path, make_source_repo)
+    _write_config(project, [])
+    paths.global_skills_config_path().write_text("{bad", encoding="utf-8")
+    messages: list[str] = []
+    result = run_enable(
+        project / ".skill-manager.json",
+        gconfig,
+        cache,
+        skills_dir,
+        url_resolver=lambda _r: f"file://{upstream}",
+        emit=messages.append,
+        picker=FakePicker(source="tw93/Waza", enable_names=[]),
+    )
+    assert result.outcomes == []
+    assert result.warnings
+    assert result.warnings[0]["code"] == "global_config_error"
+    assert any("Warning:" in m for m in messages)
+
+
 def test_enable_selects_and_syncs_once(tmp_path: Path, make_source_repo) -> None:
     project, cache, gconfig, skills_dir, upstream = _env(tmp_path, make_source_repo)
     _write_config(project, [])

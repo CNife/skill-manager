@@ -124,6 +124,14 @@ With `--json`, success is `{"ok": true, "data": ...}` and failure is
 business error / usage error). Place `--json` before the subcommand:
 `skill-manager --json list`, not `skill-manager list --json`.
 
+In **project** scope, `list` and `enable` JSON also include a per-skill boolean
+`enabled_globally` (matched by skill **name** against `~/.skill-manager.json`).
+It is omitted under `--global`. If the global declaration exists but cannot be
+read, the command still succeeds, values are `false`, and a top-level
+`warnings: [{code: "global_config_error", message}]` is added. Human `list`
+marks the same overlap with `⊕` before the name; interactive enable uses
+`✓` (project-locked) and `⊕` (global) glyphs without blocking selection.
+
 ## Paths (XDG)
 
 | What | Path |
