@@ -1,7 +1,15 @@
 """Source repository git operations for skill-manager.
 
-ensure_source clones/pulls a repo into the cache and records its HEAD in the
-global config. All git calls use subprocess with list arguments (no shell).
+Two operations with one invariant: only ``sync`` and ``source update`` may
+update already cached content.
+
+- ``clone_source``: clone a missing repo into the cache and record its HEAD in
+  the global config. Never pulls — an existing cache is left untouched.
+- ``pull_source``: ``git pull --ff-only`` in an existing cache; returns
+  ``(old_head, new_head)`` so callers can report real updates. Raises
+  ``SourceError`` on failure (never swallowed).
+
+All git calls use subprocess with list arguments (no shell).
 """
 
 from __future__ import annotations
@@ -31,30 +39,53 @@ def _run_git(args: list[str], cwd: Path | None = None) -> str:
     return result.stdout.strip()
 
 
-def ensure_source(
+def clone_source(
     repo: str,
     global_config: GlobalConfig,
     cache_root: Path,
     *,
     url: str | None = None,
 ) -> str:
-    """Clone repo into cache if missing, else pull --ff-only. Record HEAD+url in global_config.
+    """Ensure ``repo`` is cloned into the cache; record HEAD+url in ``global_config``.
 
-    Returns the current HEAD commit sha. ``url`` defaults to ``repo_url(repo)``;
-    tests pass a ``file://`` URL to use a local repo as an offline GitHub stand-in.
+    Never pulls: an existing cached clone is left untouched (only its HEAD is
+    re-read). Returns the current HEAD commit sha. ``url`` defaults to
+    ``repo_url(repo)``; tests pass a ``file://`` URL to use a local repo as an
+    offline GitHub stand-in.
     """
     actual_url = url if url is not None else repo_url(repo)
     dest = cache_root / repo
+    if not dest.resolve().is_relative_to(cache_root.resolve()):
+        raise SourceError(f"repo {repo!r} escapes the cache directory (must be 'owner/repo')")
     if not dest.exists():
         dest.parent.mkdir(parents=True, exist_ok=True)
         _run_git(["clone", "--quiet", actual_url, str(dest)])
-    else:
-        # pull --ff-only (not bare fetch) so HEAD advances when upstream moves;
-        # the cache is a pure mirror with no local commits, so ff always succeeds.
-        _run_git(["pull", "--quiet", "--ff-only"], cwd=dest)
     head = _run_git(["rev-parse", "HEAD"], cwd=dest)
     global_config.sources[repo] = Source(repo=repo, commit=head, url=actual_url)
     return head
+
+
+def pull_source(
+    repo: str,
+    global_config: GlobalConfig,
+    cache_root: Path,
+) -> tuple[str, str]:
+    """Pull --ff-only in the cached clone of ``repo``; return ``(old_head, new_head)``.
+
+    The cache is a pure mirror with no local commits, so ff always succeeds when
+    upstream is reachable. Records the new HEAD in ``global_config``. Raises
+    ``SourceError`` when the cache is missing or the pull fails.
+    """
+    dest = cache_root / repo
+    if not dest.is_dir():
+        raise SourceError(f"source repo {repo!r} is not cached")
+    old = _run_git(["rev-parse", "HEAD"], cwd=dest)
+    _run_git(["pull", "--quiet", "--ff-only"], cwd=dest)
+    new = _run_git(["rev-parse", "HEAD"], cwd=dest)
+    src = global_config.sources.get(repo)
+    url = src.url if src is not None else repo_url(repo)
+    global_config.sources[repo] = Source(repo=repo, commit=new, url=url)
+    return old, new
 
 
 def remove_source(

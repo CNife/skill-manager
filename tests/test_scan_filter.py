@@ -26,6 +26,7 @@ NOISE = skill_md("noise", "noise under skip dir")
 ROOT_SKILL = skill_md("root-skill", "repo root", body="# root\n")
 MISSING_DESC = "---\nname: nodesc\n---\n# nodesc\n"
 EMPTY_NAME = "---\nname: ''\ndescription: x\n---\n# x\n"
+EVIL_NAME = "---\nname: ../../evil\ndescription: evil skill\n---\n# evil\n"
 
 FILTERED_LAYOUT = {
     "skills/active": ACTIVE,
@@ -60,13 +61,13 @@ def _seed_cached_source(
     """Clone a file:// source into the isolated XDG cache; return (project, full_commit)."""
     from skill_manager import paths
     from skill_manager.config import GlobalConfig, save_global_config
-    from skill_manager.sources import ensure_source
+    from skill_manager.sources import clone_source
 
     skills = skills or {"skills/read": skill_md("read")}
     upstream = make_source_repo(repo_name, skills)
     url = f"file://{upstream}"
     cfg = GlobalConfig()
-    head = ensure_source(owner_repo, cfg, paths.repos_cache_dir(), url=url)
+    head = clone_source(owner_repo, cfg, paths.repos_cache_dir(), url=url)
     save_global_config(paths.config_file(), cfg)
     project = tmp_path / "proj"
     project.mkdir(exist_ok=True)
@@ -197,6 +198,27 @@ def test_json_available_skills_internal_non_bool_still_listed(
     assert ("nodesc", "skills/nodesc") not in keys
 
 
+def test_evil_name_skill_never_qualifies(tmp_path: Path, make_source_repo, monkeypatch) -> None:
+    """F2: an FM name escaping the skills-dir shape is treated as unqualified."""
+    project, _ = _seed_cached_source(tmp_path, make_source_repo, {"skills/evil": EVIL_NAME})
+    _write_config(project, [])
+    monkeypatch.chdir(project)
+    # Never listed, with or without --all (shape check is unconditional).
+    for args in (
+        ["--json", "source", "available-skills"],
+        ["--json", "source", "available-skills", "--all"],
+    ):
+        result = runner.invoke(app, args)
+        assert result.exit_code == 0, result.output
+        assert _parse_json(result)["data"]["skills"] == []
+    # enable cannot resolve it (not found, not a declaration write).
+    result = runner.invoke(app, ["--json", "enable", "tw93/Waza", "evil"])
+    assert result.exit_code == 1, result.output
+    body = _parse_json(result)
+    assert body["error"]["code"] == "not_found"
+    assert load_skill_declarations(project / ".skill-manager.json").skills == []
+
+
 def test_available_skills_human_default_omits_archive(tmp_path: Path, make_source_repo) -> None:
     _seed_cached_source(
         tmp_path,
@@ -283,7 +305,9 @@ def test_json_enable_all_resolves_filtered_skill(
         "repo": "tw93/Waza",
         "path": ".archive/old",
     }
-    assert body["data"]["sync"]["sources"] == [{"repo": "tw93/Waza", "commit": head}]
+    assert body["data"]["sync"]["sources"] == [
+        {"repo": "tw93/Waza", "commit": head, "action": "up_to_date"}
+    ]
     proj = load_skill_declarations(project / ".skill-manager.json")
     assert len(proj.skills) == 1
     assert proj.skills[0].path == ".archive/old"
@@ -340,15 +364,18 @@ def test_json_enable_all_missing_name_no_hint(
     assert "--all" not in body["error"]["message"]
 
 
-def test_json_enable_repo_not_cached_no_all_hint(
+def test_json_enable_uncached_repo_clone_fails_no_all_hint(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Issue #46: enable auto-clones an uncached source; a failed clone is a
+    source error (no longer 'not cached'), and never a --all hint."""
     monkeypatch.chdir(tmp_path)
     _write_config(tmp_path, [])
+    monkeypatch.setattr("skill_manager.sources.repo_url", lambda r: "file:///nonexistent/repo")
     result = runner.invoke(app, ["--json", "enable", "no/such", "read"])
     assert result.exit_code == 1
     body = _parse_json(result)
-    assert body["error"]["code"] == "not_found"
+    assert body["error"]["code"] == "source_error"
     assert "--all" not in body["error"]["message"]
 
 
@@ -369,7 +396,7 @@ def test_enable_interactive_all_includes_archive_via_picker(
     """Interactive enable --all surfaces archived skills through the picker seam."""
     from skill_manager.cli import run_enable
     from skill_manager.config import GlobalConfig, save_global_config
-    from skill_manager.sources import ensure_source
+    from skill_manager.sources import clone_source
 
     class FakePicker:
         def select_source(self, choices):
@@ -380,7 +407,7 @@ def test_enable_interactive_all_includes_archive_via_picker(
             names = {c.name for c in choices}
             assert "old" in names
             assert "active" in names
-            return ["old"]
+            return [".archive/old"]
 
         def select_skills_to_disable(self, names):
             raise AssertionError("not used")
@@ -392,7 +419,7 @@ def test_enable_interactive_all_includes_archive_via_picker(
     gconfig = tmp_path / "config.json"
     skills_dir = project / ".agents" / "skills"
     cfg = GlobalConfig()
-    ensure_source("tw93/Waza", cfg, cache, url=f"file://{upstream}")
+    clone_source("tw93/Waza", cfg, cache, url=f"file://{upstream}")
     save_global_config(gconfig, cfg)
     _write_config(project, [])
 

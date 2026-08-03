@@ -59,6 +59,20 @@ skill-manager disable <name>...        # non-interactive batch disable
 skill-manager --json sync              # single JSON object on stdout (all commands)
 ```
 
+Example `list` output — every skill row carries one actionable status word:
+
+```
+Sources:
+  tw93/Waza  3f2a1c9d  cached
+Skills:
+  read    tw93/Waza:skills/read  linked
+  kami    tw93/Kami:.            unlinked
+```
+
+- `linked` = normal; `unlinked` / `broken` = fixable with `skill-manager sync`; `external` = the link points elsewhere and is left alone
+- On a TTY, status words and `Error:` / `Warning:` prefixes are colored (`linked` green, `broken` red, `external` / `unlinked` / prefixes yellow); piped output and `--json` stay plain (set `NO_COLOR` to force plain output)
+- Paths in `enable` / `disable` / `sync` output are shown relative to the current directory when possible (`.skill-manager.json`, `.agents/skills/read`), else `~`-abbreviated (`~/.skill-manager.json`), else absolute
+
 ### Batch enable / disable
 
 `enable` and `disable` accept multiple skills in one invocation:
@@ -86,6 +100,25 @@ skill-manager --json --global list           # JSON output composes with --globa
 
 Running `skill-manager` from `~` without `--global` targets `~/.skill-manager.json` too (home *is* the global project) — intentional, not a collision.
 
+### Project vs. global scope
+
+The two scopes answer different questions. The project declaration
+(`./.skill-manager.json`, committed with the repo) is **team-shared**: it says
+which skills the project needs for everyone working on it. The global
+declaration (`~/.skill-manager.json`) is **personal preference**: it says which
+skills you want everywhere, independent of any project.
+
+Declaring the same skill in both scopes is a supported scenario when both come
+from the same source — the project enables it for collaborators, you enable it
+globally for yourself. `list` marks such benign overlap with `⊕`; enabling the
+same name from *different* sources across scopes is a hard error with a
+resolution hint. The source cache is shared: a source is cloned once and both
+scopes link against it.
+
+Only `sync` and `source update` ever update already-cached sources. `enable`
+and `source add` may clone a missing source (registering it in the global
+config) but never pull — a cached clone is used as-is, however stale.
+
 ### Source repository management
 
 ```bash
@@ -107,7 +140,7 @@ skill-manager source available-skills <owner/repo> # optional: discover skill na
 skill-manager enable <owner/repo> <name>           # declare in project + sync
 ```
 
-`enable` does not clone; introduce sources with `source add` (or declare in `.skill-manager.json` and `sync`).
+Non-interactive `enable <owner/repo> <name>` clones a source that is not yet cached and registers it in the global config — the same registration `sync` performs — then declares the skill and syncs the batch. It never pulls: a source that is already cached is used as-is, however stale. The repo-less form `enable <name>` resolves names across cached sources only and never clones; for that form, introduce sources with `source add` (or declare in `.skill-manager.json` and `sync`).
 
 ### Source skill discovery
 

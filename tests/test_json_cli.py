@@ -31,13 +31,13 @@ def _seed_cached_source(
     """Clone a file:// source into the isolated XDG cache; return (project, full_commit)."""
     from skill_manager import paths
     from skill_manager.config import GlobalConfig, save_global_config
-    from skill_manager.sources import ensure_source
+    from skill_manager.sources import clone_source
 
     skills = skills or {"skills/read": skill_md("read")}
     upstream = make_source_repo("waza", skills)
     url = f"file://{upstream}"
     cfg = GlobalConfig()
-    head = ensure_source("tw93/Waza", cfg, paths.repos_cache_dir(), url=url)
+    head = clone_source("tw93/Waza", cfg, paths.repos_cache_dir(), url=url)
     save_global_config(paths.config_file(), cfg)
     project = tmp_path / "proj"
     project.mkdir()
@@ -48,27 +48,24 @@ def _seed_cached_source(
 
 
 def test_json_sync_missing_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A missing declaration file is an empty config: JSON sync succeeds (issue #48)."""
     monkeypatch.chdir(tmp_path)
     result = runner.invoke(app, ["--json", "sync"])
-    assert result.exit_code == 1
+    assert result.exit_code == 0, result.output
     body = _parse_json(result)
-    assert body == {
-        "ok": False,
-        "error": {
-            "code": "config_error",
-            "message": body["error"]["message"],
-        },
-    }
-    assert "not found" in body["error"]["message"]
+    assert body == {"ok": True, "data": {"sources": [], "links": []}}
 
 
-def test_json_flag_on_subcommand_rejected(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_json_flag_after_subcommand_accepted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """--json may follow the subcommand (issue #45: argv normalization)."""
     monkeypatch.chdir(tmp_path)
     _write_config(tmp_path, [])
     result = runner.invoke(app, ["sync", "--json"])
-    assert result.exit_code == 2
-    # Root --json was not set: usage text, not a JSON envelope.
-    assert not result.stdout.lstrip().startswith("{")
+    assert result.exit_code == 0, result.output
+    body = _parse_json(result)
+    assert body == {"ok": True, "data": {"sources": [], "links": []}}
 
 
 def test_version_with_json_still_eager() -> None:
@@ -117,7 +114,7 @@ def test_json_sync_success(
     body = _parse_json(result)
     assert body["ok"] is True
     data = body["data"]
-    assert data["sources"] == [{"repo": "tw93/Waza", "commit": head}]
+    assert data["sources"] == [{"repo": "tw93/Waza", "commit": head, "action": "up_to_date"}]
     assert data["links"] == [{"name": "read", "action": "created"}]
     assert "target" not in data["links"][0]
     assert (project / ".agents" / "skills" / "read").is_symlink()
@@ -190,12 +187,13 @@ def test_json_list_enabled_globally_by_name(
             {"name": "write", "repo": "tw93/Waza", "path": "skills/write"},
         ],
     )
-    # Global declaration shares the name "read" only (name-level match).
+    # Global declaration shares the name "read" from the same source
+    # (issue #47: same-source overlaps are benign ⊕, not conflicts).
     paths.global_skills_config_path().write_text(
         json.dumps(
             {
                 "skills": [
-                    {"name": "read", "repo": "other/Repo", "path": "skills/read"},
+                    {"name": "read", "repo": "tw93/Waza", "path": "skills/read"},
                 ]
             }
         ),
@@ -208,6 +206,7 @@ def test_json_list_enabled_globally_by_name(
     by_name = {s["name"]: s for s in body["data"]["skills"]}
     assert by_name["read"]["enabled_globally"] is True
     assert by_name["write"]["enabled_globally"] is False
+    assert "global_conflict" not in by_name["read"]
     assert "warnings" not in body
 
 
@@ -280,7 +279,7 @@ def test_list_human_keeps_sources_section(
 def test_list_human_marks_enabled_globally(
     tmp_path: Path, make_source_repo, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Project list prefixes ⊕ and prints a legend for global name overlaps."""
+    """Project list prefixes ⊕ and prints the same-source legend for overlaps."""
     from skill_manager import paths
 
     project, _head = _seed_cached_source(
@@ -295,8 +294,9 @@ def test_list_human_marks_enabled_globally(
             {"name": "write", "repo": "tw93/Waza", "path": "skills/write"},
         ],
     )
+    # Same-source overlap (issue #47): benign ⊕, not a conflict.
     paths.global_skills_config_path().write_text(
-        json.dumps({"skills": [{"name": "read", "repo": "other/Repo", "path": "skills/read"}]}),
+        json.dumps({"skills": [{"name": "read", "repo": "tw93/Waza", "path": "skills/read"}]}),
         encoding="utf-8",
     )
     monkeypatch.chdir(project)
@@ -304,7 +304,7 @@ def test_list_human_marks_enabled_globally(
     assert result.exit_code == 0, result.output
     out = result.stdout
     assert "Skills:" in out
-    assert "(⊕ = enabled globally)" in out
+    assert "(⊕ = also enabled globally, same source)" in out
     assert "⊕ read" in out
     # write is project-only: padded spaces, no mark; no global-only rows injected
     assert "⊕ write" not in out
@@ -318,8 +318,10 @@ def test_enable_human_mentions_also_enabled_globally(
 
     project, _head = _seed_cached_source(tmp_path, make_source_repo)
     _write_config(project, [])
+    # Same-source global overlap: legal, neutral hint (issue #47: a different
+    # source would be a hard conflict, covered in test_duplicate_names).
     paths.global_skills_config_path().write_text(
-        json.dumps({"skills": [{"name": "read", "repo": "other/Repo", "path": "skills/read"}]}),
+        json.dumps({"skills": [{"name": "read", "repo": "tw93/Waza", "path": "skills/read"}]}),
         encoding="utf-8",
     )
     monkeypatch.chdir(project)
@@ -407,7 +409,8 @@ def test_json_source_update_not_registered(tmp_path: Path) -> None:
     assert body["error"]["code"] == "not_found"
 
 
-def test_json_source_update_one(tmp_path: Path, make_source_repo) -> None:
+def test_json_source_update_noop(tmp_path: Path, make_source_repo) -> None:
+    """An empty pull reports action up_to_date (issue #46: no fake 'updated')."""
     _project, head = _seed_cached_source(tmp_path, make_source_repo)
     from skill_manager import paths
 
@@ -423,7 +426,42 @@ def test_json_source_update_one(tmp_path: Path, make_source_repo) -> None:
     assert result.exit_code == 0, result.output
     body = _parse_json(result)
     assert body["ok"] is True
-    assert body["data"]["updates"] == [{"action": "updated", "repo": "tw93/Waza", "commit": head}]
+    assert body["data"]["updates"] == [
+        {"action": "up_to_date", "repo": "tw93/Waza", "commit": head}
+    ]
+
+
+def test_json_source_update_pulled(tmp_path: Path, make_source_repo, git) -> None:
+    """A real pull reports action updated with old_commit/new_commit."""
+    _project, head = _seed_cached_source(tmp_path, make_source_repo)
+    from skill_manager import paths
+
+    cache_repo = paths.repos_cache_dir() / "tw93" / "Waza"
+    upstream = tmp_path / "sources" / "waza"
+    subprocess.run(
+        ["git", "remote", "set-url", "origin", f"file://{upstream}"],
+        cwd=cache_repo,
+        check=True,
+        capture_output=True,
+    )
+    (upstream / "note.txt").write_text("x", encoding="utf-8")
+    git(["add", "."], upstream)
+    git(["commit", "-m", "advance"], upstream)
+    result = runner.invoke(app, ["--json", "source", "update", "tw93/Waza"])
+    assert result.exit_code == 0, result.output
+    body = _parse_json(result)
+    assert body["ok"] is True
+    new = body["data"]["updates"][0]["new_commit"]
+    assert new != head
+    assert body["data"]["updates"] == [
+        {
+            "action": "updated",
+            "repo": "tw93/Waza",
+            "commit": new,
+            "old_commit": head,
+            "new_commit": new,
+        }
+    ]
 
 
 # ── source available-skills ───────────────────────────────────────────────────
@@ -517,7 +555,9 @@ def test_json_enable_success(
             "enabled_globally": False,
         }
     ]
-    assert data["sync"]["sources"] == [{"repo": "tw93/Waza", "commit": head}]
+    assert data["sync"]["sources"] == [
+        {"repo": "tw93/Waza", "commit": head, "action": "up_to_date"}
+    ]
     assert data["sync"]["links"] == [{"name": "read", "action": "created"}]
     proj = load_skill_declarations(project / ".skill-manager.json")
     assert len(proj.skills) == 1
@@ -563,7 +603,9 @@ def test_json_enable_bootstraps_missing_project_config(
             "enabled_globally": False,
         }
     ]
-    assert data["sync"]["sources"] == [{"repo": "tw93/Waza", "commit": head}]
+    assert data["sync"]["sources"] == [
+        {"repo": "tw93/Waza", "commit": head, "action": "up_to_date"}
+    ]
     assert data["sync"]["links"] == [{"name": "read", "action": "created"}]
     proj = load_skill_declarations(project / ".skill-manager.json")
     assert len(proj.skills) == 1
@@ -589,7 +631,9 @@ def test_json_enable_bootstraps_empty_project_config(
             "enabled_globally": False,
         }
     ]
-    assert data["sync"]["sources"] == [{"repo": "tw93/Waza", "commit": head}]
+    assert data["sync"]["sources"] == [
+        {"repo": "tw93/Waza", "commit": head, "action": "up_to_date"}
+    ]
     proj = load_skill_declarations(project / ".skill-manager.json")
     assert len(proj.skills) == 1
 
@@ -609,13 +653,22 @@ def test_json_enable_invalid_project_config(
     assert "invalid JSON" in body["error"]["message"]
 
 
-def test_json_enable_repo_not_cached(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_json_enable_uncached_repo_clone_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """enable auto-clones an uncached source; an unreachable URL is a source error.
+
+    Issue #46: enable no longer reports ``not cached`` — it clones, and a
+    failed clone surfaces as ``source_error``.
+    """
     monkeypatch.chdir(tmp_path)
     _write_config(tmp_path, [])
+    monkeypatch.setattr("skill_manager.sources.repo_url", lambda r: "file:///nonexistent/repo")
     result = runner.invoke(app, ["--json", "enable", "no/such", "read"])
     assert result.exit_code == 1
     body = _parse_json(result)
-    assert body["error"]["code"] == "not_found"
+    assert body["error"]["code"] == "source_error"
+    assert "clone" in body["error"]["message"]
 
 
 def test_json_enable_name_not_found(
@@ -672,7 +725,11 @@ def test_json_enable_one_arg_usage_error(tmp_path: Path, monkeypatch: pytest.Mon
 def test_json_enable_enabled_globally_true(
     tmp_path: Path, make_source_repo, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Project enable reports enabled_globally by name; orthogonal to action."""
+    """Project enable reports enabled_globally by name; orthogonal to action.
+
+    Same-source global overlap (issue #47: a different source would be a hard
+    cross-scope conflict, covered in test_duplicate_names).
+    """
     from skill_manager import paths
 
     project, _head = _seed_cached_source(
@@ -685,8 +742,8 @@ def test_json_enable_enabled_globally_true(
         json.dumps(
             {
                 "skills": [
-                    {"name": "read", "repo": "other/Repo", "path": "x/read"},
-                    {"name": "write", "repo": "other/Repo", "path": "x/write"},
+                    {"name": "read", "repo": "tw93/Waza", "path": "skills/read"},
+                    {"name": "write", "repo": "tw93/Waza", "path": "skills/write"},
                 ]
             }
         ),

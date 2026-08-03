@@ -124,20 +124,23 @@ def _check_duplicate_names(skills: list[SkillRef], path: Path) -> None:
         seen.add(skill.name)
 
 
-def load_skill_declarations(path: Path) -> SkillDeclarations:
+def load_skill_declarations(path: Path, label: str = "project config") -> SkillDeclarations:
+    """Load a skill declaration file, or raise ConfigError on missing/invalid content.
+
+    ``label`` names the active scope in error messages (callers under ``--global``
+    pass "global skills config" so wording never misnames the scope).
+    """
     if not path.is_file():
-        raise ConfigError(f"project config not found: {path}")
+        raise ConfigError(f"{label} not found: {path}")
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except json.JSONDecodeError as e:
         raise ConfigError(f"invalid JSON in {path}: {e}") from e
     if not isinstance(data, dict):
-        raise ConfigError(
-            f"project config must be a JSON object in {path}, got {type(data).__name__}"
-        )
+        raise ConfigError(f"{label} must be a JSON object in {path}, got {type(data).__name__}")
     skills_raw = data.get("skills")
     if not isinstance(skills_raw, list):
-        raise ConfigError(f"project config missing 'skills' list in {path}")
+        raise ConfigError(f"{label} missing 'skills' list in {path}")
     skills = [_parse_skill(item, path) for item in skills_raw]
     _check_duplicate_names(skills, path)
     return SkillDeclarations(skills=skills)

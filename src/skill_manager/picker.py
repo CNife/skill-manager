@@ -47,9 +47,24 @@ class SkillChoice:
     enabled_globally: bool = False
 
 
-def skill_enable_title(name: str, *, enabled_globally: bool = False) -> str:
-    """Human title for an enable row: optional ``⊕ `` prefix, then name."""
-    return f"⊕ {name}" if enabled_globally else name
+def skill_enable_title(
+    name: str, *, enabled_globally: bool = False, path: str | None = None
+) -> str:
+    """Human title for an enable row: optional ``⊕ `` prefix, then name.
+
+    ``path`` (a repo-internal skill path) is appended as ``name (path)`` so
+    same-named rows can be told apart when a source hosts duplicate names.
+    """
+    title = f"⊕ {name}" if enabled_globally else name
+    if path is not None:
+        title = f"{title} ({path})"
+    return title
+
+
+def skill_enable_title_for(choice: SkillChoice, *, name_count: int) -> str:
+    """Row title for ``choice``; duplicate names (``name_count`` > 1) show the path."""
+    path = choice.path if name_count > 1 else None
+    return skill_enable_title(choice.name, enabled_globally=choice.enabled_globally, path=path)
 
 
 class Picker(Protocol):
@@ -62,7 +77,9 @@ class Picker(Protocol):
     def select_skills_to_enable(self, choices: Sequence[SkillChoice]) -> list[str]:
         """Multi-select skills to enable.
 
-        Returns names of checked, non-locked skills (may be empty = empty submit).
+        Returns the repo-internal paths of checked, non-locked skills (may be
+        empty = empty submit). Path is the row identity: same-named rows stay
+        distinguishable and each selection maps to exactly one path.
         Raises ``PickerCancelled`` on cancel.
         """
         ...
@@ -505,17 +522,20 @@ class QuestionaryPicker:
         )
 
     def select_skills_to_enable(self, choices: Sequence[SkillChoice]) -> list[str]:
+        from collections import Counter
+
         from questionary import Choice
 
         style = _q_style()
+        name_counts = Counter(c.name for c in choices)
         q_choices = []
         for c in choices:
-            title = skill_enable_title(c.name, enabled_globally=c.enabled_globally)
+            title = skill_enable_title_for(c, name_count=name_counts[c.name])
             if c.locked:
                 q_choices.append(
                     Choice(
                         title=title,
-                        value=c.name,
+                        value=c.path,
                         disabled=True,
                         checked=True,
                         description=c.description or None,
@@ -525,7 +545,7 @@ class QuestionaryPicker:
                 q_choices.append(
                     Choice(
                         title=title,
-                        value=c.name,
+                        value=c.path,
                         description=c.description or None,
                     )
                 )

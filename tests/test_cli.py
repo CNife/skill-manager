@@ -45,10 +45,11 @@ def test_list_help() -> None:
 
 
 def test_sync_missing_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A missing declaration file is an empty config: sync is a no-op (issue #48)."""
     monkeypatch.chdir(tmp_path)
     result = runner.invoke(app, ["sync"])
-    assert result.exit_code == 1
-    assert "not found" in result.output
+    assert result.exit_code == 0
+    assert "Nothing to sync." in result.output
 
 
 def test_sync_bad_json(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -226,7 +227,7 @@ class _PickAll:
         return choices[0].repo
 
     def select_skills_to_enable(self, choices):
-        return [c.name for c in choices if not c.locked]
+        return [c.path for c in choices if not c.locked]
 
     def select_skills_to_disable(self, names):
         return list(names)
@@ -285,9 +286,9 @@ def _seed_cached_source_direct(
     gconfig = tmp_path / "config.json"
     skills_dir = project / ".agents" / "skills"
     cfg = load_global_config(gconfig)
-    from skill_manager.sources import ensure_source
+    from skill_manager.sources import clone_source
 
-    head = ensure_source("tw93/Waza", cfg, cache, url=url)
+    head = clone_source("tw93/Waza", cfg, cache, url=url)
     save_global_config(gconfig, cfg)
     return project, cache, gconfig, skills_dir, upstream, head
 
@@ -435,11 +436,11 @@ def test_source_list_help() -> None:
 
 
 def test_source_list_empty(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """source list with no registered sources outputs nothing."""
+    """source list with no registered sources prints the empty-state line."""
     monkeypatch.chdir(tmp_path)
     result = runner.invoke(app, ["source", "list"])
     assert result.exit_code == 0
-    assert result.stdout.strip() == ""
+    assert result.stdout.strip() == "No sources registered (use 'source add' first)"
 
 
 def test_source_add_invalid_repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -568,10 +569,10 @@ def test_source_add_network(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> 
     url = f"file://{repo_dir}"
 
     from skill_manager.config import GlobalConfig, save_global_config
-    from skill_manager.sources import ensure_source
+    from skill_manager.sources import clone_source
 
     cfg = GlobalConfig()
-    head = ensure_source("test/foo", cfg, paths.repos_cache_dir(), url=url)
+    head = clone_source("test/foo", cfg, paths.repos_cache_dir(), url=url)
     save_global_config(paths.config_file(), cfg)
 
     result = runner.invoke(app, ["source", "list"])
