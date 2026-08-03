@@ -60,13 +60,13 @@ def _seed_cached_source(
     """Clone a file:// source into the isolated XDG cache; return (project, full_commit)."""
     from skill_manager import paths
     from skill_manager.config import GlobalConfig, save_global_config
-    from skill_manager.sources import ensure_source
+    from skill_manager.sources import clone_source
 
     skills = skills or {"skills/read": skill_md("read")}
     upstream = make_source_repo(repo_name, skills)
     url = f"file://{upstream}"
     cfg = GlobalConfig()
-    head = ensure_source(owner_repo, cfg, paths.repos_cache_dir(), url=url)
+    head = clone_source(owner_repo, cfg, paths.repos_cache_dir(), url=url)
     save_global_config(paths.config_file(), cfg)
     project = tmp_path / "proj"
     project.mkdir(exist_ok=True)
@@ -283,7 +283,9 @@ def test_json_enable_all_resolves_filtered_skill(
         "repo": "tw93/Waza",
         "path": ".archive/old",
     }
-    assert body["data"]["sync"]["sources"] == [{"repo": "tw93/Waza", "commit": head}]
+    assert body["data"]["sync"]["sources"] == [
+        {"repo": "tw93/Waza", "commit": head, "action": "up_to_date"}
+    ]
     proj = load_skill_declarations(project / ".skill-manager.json")
     assert len(proj.skills) == 1
     assert proj.skills[0].path == ".archive/old"
@@ -340,15 +342,18 @@ def test_json_enable_all_missing_name_no_hint(
     assert "--all" not in body["error"]["message"]
 
 
-def test_json_enable_repo_not_cached_no_all_hint(
+def test_json_enable_uncached_repo_clone_fails_no_all_hint(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Issue #46: enable auto-clones an uncached source; a failed clone is a
+    source error (no longer 'not cached'), and never a --all hint."""
     monkeypatch.chdir(tmp_path)
     _write_config(tmp_path, [])
+    monkeypatch.setattr("skill_manager.sources.repo_url", lambda r: "file:///nonexistent/repo")
     result = runner.invoke(app, ["--json", "enable", "no/such", "read"])
     assert result.exit_code == 1
     body = _parse_json(result)
-    assert body["error"]["code"] == "not_found"
+    assert body["error"]["code"] == "source_error"
     assert "--all" not in body["error"]["message"]
 
 
@@ -369,7 +374,7 @@ def test_enable_interactive_all_includes_archive_via_picker(
     """Interactive enable --all surfaces archived skills through the picker seam."""
     from skill_manager.cli import run_enable
     from skill_manager.config import GlobalConfig, save_global_config
-    from skill_manager.sources import ensure_source
+    from skill_manager.sources import clone_source
 
     class FakePicker:
         def select_source(self, choices):
@@ -392,7 +397,7 @@ def test_enable_interactive_all_includes_archive_via_picker(
     gconfig = tmp_path / "config.json"
     skills_dir = project / ".agents" / "skills"
     cfg = GlobalConfig()
-    ensure_source("tw93/Waza", cfg, cache, url=f"file://{upstream}")
+    clone_source("tw93/Waza", cfg, cache, url=f"file://{upstream}")
     save_global_config(gconfig, cfg)
     _write_config(project, [])
 

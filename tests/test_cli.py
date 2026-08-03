@@ -285,9 +285,9 @@ def _seed_cached_source_direct(
     gconfig = tmp_path / "config.json"
     skills_dir = project / ".agents" / "skills"
     cfg = load_global_config(gconfig)
-    from skill_manager.sources import ensure_source
+    from skill_manager.sources import clone_source
 
-    head = ensure_source("tw93/Waza", cfg, cache, url=url)
+    head = clone_source("tw93/Waza", cfg, cache, url=url)
     save_global_config(gconfig, cfg)
     return project, cache, gconfig, skills_dir, upstream, head
 
@@ -568,10 +568,10 @@ def test_source_add_network(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> 
     url = f"file://{repo_dir}"
 
     from skill_manager.config import GlobalConfig, save_global_config
-    from skill_manager.sources import ensure_source
+    from skill_manager.sources import clone_source
 
     cfg = GlobalConfig()
-    head = ensure_source("test/foo", cfg, paths.repos_cache_dir(), url=url)
+    head = clone_source("test/foo", cfg, paths.repos_cache_dir(), url=url)
     save_global_config(paths.config_file(), cfg)
 
     result = runner.invoke(app, ["source", "list"])

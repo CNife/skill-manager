@@ -15,7 +15,7 @@ from skill_manager.config import (
     save_global_config,
 )
 from skill_manager.picker import PickerCancelled, SkillChoice, SourceChoice
-from skill_manager.sources import ensure_source
+from skill_manager.sources import clone_source
 
 
 def _write_config(project: Path, skills: list[dict]) -> None:
@@ -35,7 +35,7 @@ def _env(tmp_path: Path, make_source_repo, skills: dict[str, str] | None = None)
     gconfig = tmp_path / "config.json"
     skills_dir = project / ".agents" / "skills"
     cfg = load_global_config(gconfig)
-    ensure_source("tw93/Waza", cfg, cache, url=f"file://{upstream}")
+    clone_source("tw93/Waza", cfg, cache, url=f"file://{upstream}")
     save_global_config(gconfig, cfg)
     return project, cache, gconfig, skills_dir, upstream
 

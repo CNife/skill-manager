@@ -37,6 +37,17 @@ from skill_manager.sources import SourceError
 class SourceEnsured:
     repo: str
     commit: str
+    action: str | None = None  # updated | up_to_date | cloned
+    old_commit: str | None = None  # set when action == "updated"
+
+    def to_data(self) -> dict[str, Any]:
+        data: dict[str, Any] = {"repo": self.repo, "commit": self.commit}
+        if self.action is not None:
+            data["action"] = self.action
+        if self.action == "updated":
+            data["old_commit"] = self.old_commit
+            data["new_commit"] = self.commit
+        return data
 
 
 @dataclass(frozen=True)
@@ -52,7 +63,7 @@ class SyncResult:
 
     def to_data(self) -> dict[str, Any]:
         return {
-            "sources": [{"repo": s.repo, "commit": s.commit} for s in self.sources],
+            "sources": [s.to_data() for s in self.sources],
             "links": [{"name": link.name, "action": link.action} for link in self.links],
         }
 
@@ -156,8 +167,38 @@ class ScannedSkill:
 # ── JSON-aware Typer group (usage errors become JSON when --json is set) ──────
 
 
+_ROOT_HOISTABLE = ("--global", "--json")
+
+
+def _normalize_argv(argv: list[str]) -> list[str]:
+    """Hoist root-only bool flags that appear after the subcommand token.
+
+    ``--global`` and ``--json`` are root options, so ``sync --global`` and
+    ``list --json`` would otherwise fail with "No such option". Move every
+    occurrence found before the ``--`` separator ahead of the subcommand,
+    preserving the relative order of the moved tokens; everything else
+    (including all tokens after ``--``) stays exactly where it was.
+    """
+    hoisted: list[str] = []
+    rest: list[str] = []
+    after_double_dash = False
+    for arg in argv:
+        if arg == "--":
+            after_double_dash = True
+            rest.append(arg)
+        elif not after_double_dash and arg in _ROOT_HOISTABLE:
+            hoisted.append(arg)
+        else:
+            rest.append(arg)
+    return [*hoisted, *rest]
+
+
 def _root_json_requested(argv: list[str]) -> bool:
-    """True only when ``--json`` appears among root options (before the subcommand)."""
+    """True only when ``--json`` appears among root options (before the subcommand).
+
+    Called on already-normalized argv, so any ``--json`` before the ``--``
+    separator has been hoisted ahead of the subcommand by ``_normalize_argv``.
+    """
     for arg in argv:
         if arg == "--":
             return False
@@ -176,13 +217,15 @@ class SkillManagerGroup(TyperGroup):
 
     def main(self, args: list[str] | None = None, standalone_mode: bool = True, **kwargs: Any):
         argv = list(args) if args is not None else sys.argv[1:]
-        want_json = _root_json_requested(argv)
+        # Hoist --global/--json found after the subcommand so both orders parse.
+        normalized = _normalize_argv(argv)
+        want_json = _root_json_requested(normalized)
         if not (want_json and standalone_mode):
-            return super().main(args=args, standalone_mode=standalone_mode, **kwargs)
+            return super().main(args=normalized, standalone_mode=standalone_mode, **kwargs)
         try:
             # standalone_mode=False: click turns Exit into a returned int exit code
             # (does not raise), and propagates ClickException for us to format.
-            result = super().main(args=args, standalone_mode=False, **kwargs)
+            result = super().main(args=normalized, standalone_mode=False, **kwargs)
         except click.ClickException as e:
             click.echo(
                 json.dumps(
@@ -375,7 +418,12 @@ def run_sync(
     url_resolver: Callable[[str], str] | None = None,
     emit: Callable[[str], None] | None = None,
 ) -> SyncResult:
-    """Orchestrate sync: ensure sources, record HEADs, link skills.
+    """Orchestrate sync: pull (or clone) every declared source, link skills.
+
+    Sync is the only command that updates already cached content: each repo is
+    pulled with ``--ff-only``; a missing cache is cloned instead. A start line
+    (``pulling <repo>...``) is emitted before every pull and a result line
+    (``pulled <old8> → <new8>`` / ``up-to-date <head8>``) after.
 
     ``url_resolver`` defaults to ``sources.repo_url`` (GitHub HTTPS); tests pass
     a ``file://`` resolver to use local repos as offline GitHub stand-ins.
@@ -389,10 +437,27 @@ def run_sync(
     global_cfg = config.load_global_config(global_config_path)
     result = SyncResult()
     for repo in repos:
-        head = sources.ensure_source(repo, global_cfg, cache_root, url=resolver(repo))
-        result.sources.append(SourceEnsured(repo=repo, commit=head))
-        if emit is not None:
-            emit(f"ensured {repo} ({head[:8]})")
+        if (cache_root / repo).is_dir():
+            if emit is not None:
+                emit(f"pulling {repo}...")
+            old, new = sources.pull_source(repo, global_cfg, cache_root)
+            if old != new:
+                result.sources.append(
+                    SourceEnsured(repo=repo, commit=new, action="updated", old_commit=old)
+                )
+                if emit is not None:
+                    emit(f"pulled {repo} ({old[:8]} → {new[:8]})")
+            else:
+                result.sources.append(SourceEnsured(repo=repo, commit=new, action="up_to_date"))
+                if emit is not None:
+                    emit(f"up-to-date {repo} ({new[:8]})")
+        else:
+            if emit is not None:
+                emit(f"cloning {repo}...")
+            head = sources.clone_source(repo, global_cfg, cache_root, url=resolver(repo))
+            result.sources.append(SourceEnsured(repo=repo, commit=head, action="cloned"))
+            if emit is not None:
+                emit(f"cloned {repo} ({head[:8]})")
     config.save_global_config(global_config_path, global_cfg)
     for skill in proj.skills:
         link_result = links.ensure_link(skill, cache_root, skills_dir)
@@ -818,7 +883,16 @@ def _enable_noninteractive(
     if needs_resolution:
         repo_dir = cache_root / repo
         if not repo_dir.is_dir():
-            raise NotFoundError(f"source repo {repo!r} is not cached")
+            # enable may clone a missing source (never pull). Registration in
+            # the global config happens later in _enable_apply_batch, which
+            # reloads from disk; this in-memory registration is only for
+            # clone_source's contract.
+            global_cfg = config.load_global_config(global_config_path)
+            resolver = url_resolver or sources.repo_url
+            _emit(emit, f"cloning {repo}...")
+            head = sources.clone_source(repo, global_cfg, cache_root, url=resolver(repo))
+            _emit(emit, f"cloned {repo} ({head[:8]})")
+            repo_dir = cache_root / repo
         available = _scan_skills(repo_dir, repo, include_all=include_all)
         for skill_name in needs_resolution:
             matches = [s for s in available if s.name == skill_name]
@@ -869,8 +943,9 @@ def _enable_apply_batch(
     """Commit a validated, deduped batch of (name, path) skills.
 
     Already-enabled names are idempotent successes (their path entry is
-    ignored); new names are appended and a single sync runs only when at least
-    one skill was added.
+    ignored); new names are appended. When at least one skill was added, the
+    target repo is ensured cloned (never pulled — only sync and source update
+    update cached content) and the new skills are linked.
 
     ``cross_hint`` is the optional preloaded ``_load_global_enabled_hint`` result
     so interactive enable can reuse one load for picker rows and apply.
@@ -886,6 +961,7 @@ def _enable_apply_batch(
             emit(f"Warning: {w['message']}")
     outcomes: list[EnableOutcome] = []
     added = 0
+    added_refs: list[SkillRef] = []
     for skill_name, skill_path in resolved:
         hint = (skill_name in global_names) if global_names is not None else None
         existing = enabled.get(skill_name)
@@ -901,7 +977,9 @@ def _enable_apply_batch(
                 )
             )
             continue
-        proj.skills.append(SkillRef(name=skill_name, repo=repo, path=skill_path))
+        skill_ref = SkillRef(name=skill_name, repo=repo, path=skill_path)
+        proj.skills.append(skill_ref)
+        added_refs.append(skill_ref)
         _emit(emit, f"Added {skill_name} ({repo}:{skill_path}) to {project_config}")
         if hint:
             _emit(emit, f"Skill {skill_name!r} also enabled globally")
@@ -917,14 +995,24 @@ def _enable_apply_batch(
     sync_result = None
     if added:
         config.save_skill_declarations(project_config, proj)
-        sync_result = run_sync(
-            project_config,
-            global_config_path,
-            cache_root,
-            skills_dir,
-            url_resolver=url_resolver,
-            emit=emit,
+        global_cfg = config.load_global_config(global_config_path)
+        was_registered = repo in global_cfg.sources
+        resolver = url_resolver or sources.repo_url
+        head = sources.clone_source(repo, global_cfg, cache_root, url=resolver(repo))
+        config.save_global_config(global_config_path, global_cfg)
+        sync_result = SyncResult(
+            sources=[
+                SourceEnsured(
+                    repo=repo,
+                    commit=head,
+                    action="up_to_date" if was_registered else "cloned",
+                )
+            ]
         )
+        for skill_ref in added_refs:
+            link_result = links.ensure_link(skill_ref, cache_root, skills_dir)
+            sync_result.links.append(LinkDone(name=skill_ref.name, action=link_result.action))
+            _emit(emit, f"{link_result.action} {skill_ref.name} -> {link_result.target}")
     return EnableResult(outcomes=outcomes, sync=sync_result, warnings=warnings)
 
 
@@ -1273,7 +1361,7 @@ def source_add(ctx: typer.Context, repo: str) -> None:
             else:
                 typer.echo(f"source {repo} already exists")
             return
-        head = sources.ensure_source(repo, global_cfg, cache_root)
+        head = sources.clone_source(repo, global_cfg, cache_root)
         config.save_global_config(paths.config_file(), global_cfg)
         if _is_json(ctx):
             _success(ctx, {"action": "added", "repo": repo, "commit": head})
@@ -1334,11 +1422,30 @@ def source_update(
             return
 
         for r in repos:
-            head = sources.ensure_source(r, global_cfg, cache_root)
+            if (cache_root / r).is_dir():
+                old, new = sources.pull_source(r, global_cfg, cache_root)
+                if old != new:
+                    updates.append(
+                        {
+                            "action": "updated",
+                            "repo": r,
+                            "commit": new,
+                            "old_commit": old,
+                            "new_commit": new,
+                        }
+                    )
+                    if not _is_json(ctx):
+                        typer.echo(f"updated {r} ({old[:8]} → {new[:8]})")
+                else:
+                    updates.append({"action": "up_to_date", "repo": r, "commit": new})
+                    if not _is_json(ctx):
+                        typer.echo(f"up-to-date {r} ({new[:8]})")
+            else:
+                head = sources.clone_source(r, global_cfg, cache_root)
+                updates.append({"action": "cloned", "repo": r, "commit": head})
+                if not _is_json(ctx):
+                    typer.echo(f"cloned {r} ({head[:8]})")
             config.save_global_config(paths.config_file(), global_cfg)
-            updates.append({"action": "updated", "repo": r, "commit": head})
-            if not _is_json(ctx):
-                typer.echo(f"updated {r} (HEAD {head[:8]})")
 
         if _is_json(ctx):
             _success(ctx, {"updates": updates})

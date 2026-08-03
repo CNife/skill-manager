@@ -16,3 +16,6 @@ htmlcov/
 
 # hatch-vcs generated
 src/skill_manager/_version.py
+
+# subagent scratch artifacts
+.pi-subagents/

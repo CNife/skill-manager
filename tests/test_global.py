@@ -19,7 +19,7 @@ from typer.testing import CliRunner
 from skill_manager import paths
 from skill_manager.cli import app, run_sync
 from skill_manager.config import GlobalConfig, load_skill_declarations, save_global_config
-from skill_manager.sources import ensure_source
+from skill_manager.sources import clone_source
 
 runner = CliRunner()
 
@@ -40,7 +40,7 @@ def _seed_source(tmp_path: Path, make_source_repo, skills: dict[str, str] | None
     upstream = make_source_repo("waza", skills)
     url = f"file://{upstream}"
     cfg = GlobalConfig()
-    head = ensure_source("tw93/Waza", cfg, paths.repos_cache_dir(), url=url)
+    head = clone_source("tw93/Waza", cfg, paths.repos_cache_dir(), url=url)
     save_global_config(paths.config_file(), cfg)
     return head
 

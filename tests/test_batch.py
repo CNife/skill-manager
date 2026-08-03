@@ -49,7 +49,7 @@ def _parse_json(result) -> dict:
 
 def _enable_env(tmp_path: Path, make_source_repo, skills: dict[str, str] | None = None):
     """Seed cache + global config; return (project, cache, gconfig, skills_dir, upstream)."""
-    from skill_manager.sources import ensure_source
+    from skill_manager.sources import clone_source
 
     skills = skills or SKILLS
     upstream = make_source_repo("waza", skills)
@@ -59,7 +59,7 @@ def _enable_env(tmp_path: Path, make_source_repo, skills: dict[str, str] | None 
     gconfig = tmp_path / "config.json"
     skills_dir = project / ".agents" / "skills"
     cfg = load_global_config(gconfig)
-    ensure_source("tw93/Waza", cfg, cache, url=f"file://{upstream}")
+    clone_source("tw93/Waza", cfg, cache, url=f"file://{upstream}")
     save_global_config(gconfig, cfg)
     return project, cache, gconfig, skills_dir, upstream
 
@@ -255,12 +255,12 @@ def test_run_disable_batch_dedupe(tmp_path: Path, make_source_repo) -> None:
 def _seed_cli(tmp_path: Path, make_source_repo, skills: dict[str, str] | None = None) -> Path:
     """Seed isolated cache and point the cached origin at the file:// upstream."""
     from skill_manager import paths
-    from skill_manager.sources import ensure_source
+    from skill_manager.sources import clone_source
 
     skills = skills or SKILLS
     upstream = make_source_repo("waza", skills)
     cfg = GlobalConfig()
-    ensure_source("tw93/Waza", cfg, paths.repos_cache_dir(), url=f"file://{upstream}")
+    clone_source("tw93/Waza", cfg, paths.repos_cache_dir(), url=f"file://{upstream}")
     save_global_config(paths.config_file(), cfg)
     cache_repo = paths.repos_cache_dir() / "tw93" / "Waza"
     subprocess.run(
