@@ -122,12 +122,17 @@ def test_color_non_tty_stream_plain() -> None:
     assert _color("Error:", "red", stream=_FakeStream(False)) == "Error:"
 
 
-def test_color_no_color_env_disables_even_on_tty(monkeypatch: pytest.MonkeyPatch) -> None:
-    """no-color.org convention: NO_COLOR set (even empty) kills ANSI."""
-    monkeypatch.setenv("NO_COLOR", "")
-    assert _color("linked", "green", stream=_FakeStream(True)) == "linked"
+def test_color_no_color_env_disables_when_nonempty(monkeypatch: pytest.MonkeyPatch) -> None:
+    """no-color.org: NO_COLOR present and non-empty kills ANSI."""
     monkeypatch.setenv("NO_COLOR", "1")
+    assert _color("linked", "green", stream=_FakeStream(True)) == "linked"
     assert _color("Warning:", "yellow", stream=_FakeStream(True)) == "Warning:"
+
+
+def test_color_empty_no_color_keeps_tty_color(monkeypatch: pytest.MonkeyPatch) -> None:
+    """no-color.org: NO_COLOR='' (present but empty) does NOT disable ANSI."""
+    monkeypatch.setenv("NO_COLOR", "")
+    assert _color("linked", "green", stream=_FakeStream(True)) == "\x1b[32mlinked\x1b[0m"
 
 
 def test_color_enabled_honors_stream_and_no_color(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -136,6 +141,8 @@ def test_color_enabled_honors_stream_and_no_color(monkeypatch: pytest.MonkeyPatc
     assert _color_enabled(stream=_FakeStream(False)) is False
     monkeypatch.setenv("NO_COLOR", "1")
     assert _color_enabled(stream=_FakeStream(True)) is False
+    monkeypatch.setenv("NO_COLOR", "")
+    assert _color_enabled(stream=_FakeStream(True)) is True
 
 
 # ── c. display path (pure) ────────────────────────────────────────────────────

@@ -291,11 +291,12 @@ _STATUS_COLORS: dict[str, str] = {
 def _color_enabled(*, stream: Any | None = None) -> bool:
     """True when human output should carry ANSI colors.
 
-    Follows the no-color.org convention: ``NO_COLOR`` set (even empty)
-    disables color. Otherwise the destination stream must be a TTY —
-    piped/redirected output and CliRunner captures are never colored.
+    Follows the no-color.org convention: ``NO_COLOR`` present and non-empty
+    (regardless of its value) disables color; an empty ``NO_COLOR`` does not.
+    Otherwise the destination stream must be a TTY — piped/redirected output
+    and CliRunner captures are never colored.
     """
-    if os.environ.get("NO_COLOR") is not None:
+    if os.environ.get("NO_COLOR"):
         return False
     stream = sys.stdout if stream is None else stream
     try:
