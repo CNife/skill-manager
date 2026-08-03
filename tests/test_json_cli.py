@@ -48,18 +48,12 @@ def _seed_cached_source(
 
 
 def test_json_sync_missing_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A missing declaration file is an empty config: JSON sync succeeds (issue #48)."""
     monkeypatch.chdir(tmp_path)
     result = runner.invoke(app, ["--json", "sync"])
-    assert result.exit_code == 1
+    assert result.exit_code == 0, result.output
     body = _parse_json(result)
-    assert body == {
-        "ok": False,
-        "error": {
-            "code": "config_error",
-            "message": body["error"]["message"],
-        },
-    }
-    assert "not found" in body["error"]["message"]
+    assert body == {"ok": True, "data": {"sources": [], "links": []}}
 
 
 def test_json_flag_after_subcommand_accepted(

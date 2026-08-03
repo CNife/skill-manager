@@ -304,6 +304,11 @@ def _referencing_scopes(repo: str) -> list[str]:
     return scopes
 
 
+def _declaration_label(path: Path) -> str:
+    """User-facing name of the active declaration scope, for error wording."""
+    return "global skills config" if _is_global_scope(path) else "project config"
+
+
 def _load_declarations_for_enable(path: Path) -> config.SkillDeclarations:
     """Load declarations for ``enable``, bootstrapping missing/empty files.
 
@@ -311,14 +316,29 @@ def _load_declarations_for_enable(path: Path) -> config.SkillDeclarations:
     missing or zero-byte declaration file is treated as an empty config rather
     than an error. Global and project scopes behave the same here; when the
     project cwd is the user's home the two paths coincide and are handled once.
-    Malformed JSON is still reported as a config error.
+    Malformed JSON is still reported as a config error, worded for the active
+    scope (never "project config" under ``--global``).
     """
     if not path.is_file():
         return config.SkillDeclarations(skills=[])
     text = path.read_text(encoding="utf-8").strip()
     if not text:
         return config.SkillDeclarations(skills=[])
-    return config.load_skill_declarations(path)
+    return config.load_skill_declarations(path, label=_declaration_label(path))
+
+
+def _load_declarations_for_list_sync(path: Path) -> config.SkillDeclarations:
+    """Load declarations for ``list``/``sync``: a missing file is empty.
+
+    Mirrors ``enable``'s bootstrap philosophy for the read-only commands: a
+    fresh checkout (or ``--global`` before any enable) must not hard-fail on a
+    missing declaration file. Only *missing* is tolerated here, not zero-byte
+    or malformed content — those still raise ConfigError, worded for the
+    active scope.
+    """
+    if not path.is_file():
+        return config.SkillDeclarations(skills=[])
+    return config.load_skill_declarations(path, label=_declaration_label(path))
 
 
 def _emit_json(payload: dict[str, Any]) -> None:
@@ -434,7 +454,7 @@ def run_sync(
     Always returns a ``SyncResult`` for structured consumers.
     """
     resolver = url_resolver or sources.repo_url
-    proj = config.load_skill_declarations(project_config)
+    proj = _load_declarations_for_list_sync(project_config)
     repos = config.derived_sources(proj)
     global_cfg = config.load_global_config(global_config_path)
     result = SyncResult()
@@ -555,7 +575,7 @@ def run_list(
     skills_dir: Path,
 ) -> ListResult:
     """Collect declared skills with link status (and human-only source rows)."""
-    proj = config.load_skill_declarations(project_config)
+    proj = _load_declarations_for_list_sync(project_config)
     global_cfg = config.load_global_config(global_config_path)
     source_rows: list[tuple[str, str, str]] = []
     for repo in config.derived_sources(proj):
@@ -857,8 +877,12 @@ def _enable_interactive(
 
     repos = _list_cached_repos(cache_root)
     if not repos:
+        # sync with an empty declaration set is a no-op, so it can no longer
+        # populate the cache: point at source add or the auto-cloning enable.
         raise NotFoundError(
-            "No cached repos found. Run 'skill-manager sync' first to populate the cache."
+            "No cached repos found. Use 'skill-manager source add <repo>' to register a "
+            "source, or run 'skill-manager enable <owner/repo> <name>' to clone and "
+            "enable a skill directly."
         )
 
     # Build source choices with qualified skill counts (0-skill sources listed).
@@ -875,7 +899,8 @@ def _enable_interactive(
         # Defensive: picker returned an unknown repo.
         raise NotFoundError(f"source repo {selected_repo!r} is not cached")
     if not skills:
-        raise NotFoundError(f"No qualified skills found in {selected_repo}")
+        hint = "" if include_all else _ALL_HINT
+        raise NotFoundError(f"No qualified skills found in {selected_repo}{hint}")
 
     proj = _load_declarations_for_enable(project_config)
     locked = {s.name for s in proj.skills}
@@ -1033,7 +1058,11 @@ def _enable_noninteractive(
                 skill = by_path_scan.get(arg)
                 if skill is None:
                     has_not_found = True
-                    failures.append(f"skill path {arg!r} not found in cached repo {repo!r}")
+                    failures.append(
+                        f"skill path {arg!r} not found in cached repo {repo!r}; "
+                        f"run 'skill-manager source available-skills {repo}' to list "
+                        "available skills"
+                    )
                     continue
                 existing = enabled_by_name.get(skill.name)
                 if existing is not None:
@@ -1058,7 +1087,11 @@ def _enable_noninteractive(
                     resolved.append((arg, repo, existing.path))
                     continue
                 has_not_found = True
-                failures.append(f"skill {arg!r} not found in cached repo {repo!r}")
+                failures.append(
+                    f"skill {arg!r} not found in cached repo {repo!r}; "
+                    f"run 'skill-manager source available-skills {repo}' to list "
+                    "available skills"
+                )
                 continue
             if len(matches) > 1:
                 paths_list = ", ".join(s.path for s in matches)
@@ -1364,7 +1397,9 @@ def run_available_skills(
         config.validate_repo(repo, "source available-skills")
         repo_dir = cache_root / repo
         if not repo_dir.is_dir():
-            raise NotFoundError(f"source repo {repo!r} is not cached")
+            raise NotFoundError(
+                f"source repo {repo!r} is not cached (use 'source add {repo}' first)"
+            )
         skills = [
             {"name": s.name, "repo": repo, "path": s.path}
             for s in _scan_skills(repo_dir, repo, include_all=include_all)
@@ -1395,6 +1430,8 @@ def sync(ctx: typer.Context) -> None:
             skills_dir,
             emit=emit,
         )
+        if not _is_json(ctx) and not result.sources and not result.links:
+            typer.echo("Nothing to sync.")
         _success(ctx, result.to_data())
     except (ConfigError, SourceError, LinkError, NotFoundError, UsageError) as e:
         _handle_command_error(ctx, e)
@@ -1429,6 +1466,12 @@ def list_(ctx: typer.Context) -> None:
         else:
             for w in result.warnings:
                 typer.echo(f"Warning: {w['message']}", err=True)
+            if not result.skills and not result.source_rows:
+                typer.echo(
+                    "No skills enabled yet. Try 'skill-manager enable' or "
+                    "'skill-manager source available-skills' to discover and enable skills."
+                )
+                return
             typer.echo("Sources:")
             for repo, head, status in result.source_rows:
                 typer.echo(f"  {repo}  {head}  {status}")
@@ -1569,6 +1612,9 @@ def source_list(ctx: typer.Context) -> None:
             }
             _success(ctx, data)
             return
+        if not global_cfg.sources:
+            typer.echo("No sources registered (use 'source add' first)")
+            return
         for repo in sorted(global_cfg.sources):
             src = global_cfg.sources[repo]
             cached = (cache_root / repo).is_dir()
@@ -1622,8 +1668,8 @@ def source_remove(ctx: typer.Context, repo: str) -> None:
         referenced_scopes = _referencing_scopes(repo)
         if referenced_scopes and not _is_json(ctx):
             typer.echo(
-                f"warning: {repo!r} still referenced by {', '.join(referenced_scopes)} "
-                "skills, links may break",
+                f"warning: {repo!r} still referenced by: {', '.join(referenced_scopes)} "
+                "(other projects not checked); links may break",
                 err=True,
             )
         sources.remove_source(repo, global_cfg, cache_root)

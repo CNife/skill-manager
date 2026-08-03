@@ -123,8 +123,9 @@ def test_list_json_after_subcommand_matches_root_first(
 def test_json_error_envelope_when_json_after_subcommand(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """``sync --json`` (missing config) emits the JSON error envelope."""
+    """``sync --json`` (malformed config) emits the JSON error envelope."""
     monkeypatch.chdir(tmp_path)
+    (tmp_path / ".skill-manager.json").write_text("{bad", encoding="utf-8")
 
     root_first = runner.invoke(app, ["--json", "sync"])
     after = runner.invoke(app, ["sync", "--json"])
@@ -134,7 +135,7 @@ def test_json_error_envelope_when_json_after_subcommand(
     body = _parse_json(after)
     assert body["ok"] is False
     assert body["error"]["code"] == "config_error"
-    assert "not found" in body["error"]["message"]
+    assert "invalid JSON" in body["error"]["message"]
 
 
 # ── -- separator: tokens after it are never rewritten ────────────────────────

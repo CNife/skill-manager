@@ -45,10 +45,11 @@ def test_list_help() -> None:
 
 
 def test_sync_missing_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A missing declaration file is an empty config: sync is a no-op (issue #48)."""
     monkeypatch.chdir(tmp_path)
     result = runner.invoke(app, ["sync"])
-    assert result.exit_code == 1
-    assert "not found" in result.output
+    assert result.exit_code == 0
+    assert "Nothing to sync." in result.output
 
 
 def test_sync_bad_json(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -435,11 +436,11 @@ def test_source_list_help() -> None:
 
 
 def test_source_list_empty(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """source list with no registered sources outputs nothing."""
+    """source list with no registered sources prints the empty-state line."""
     monkeypatch.chdir(tmp_path)
     result = runner.invoke(app, ["source", "list"])
     assert result.exit_code == 0
-    assert result.stdout.strip() == ""
+    assert result.stdout.strip() == "No sources registered (use 'source add' first)"
 
 
 def test_source_add_invalid_repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
