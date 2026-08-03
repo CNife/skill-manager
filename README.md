@@ -59,6 +59,20 @@ skill-manager disable <name>...        # non-interactive batch disable
 skill-manager --json sync              # single JSON object on stdout (all commands)
 ```
 
+Example `list` output — every skill row carries one actionable status word:
+
+```
+Sources:
+  tw93/Waza  3f2a1c9d  cached
+Skills:
+  read    tw93/Waza:skills/read  linked
+  kami    tw93/Kami:.            unlinked
+```
+
+- `linked` = normal; `unlinked` / `broken` = fixable with `skill-manager sync`; `external` = the link points elsewhere and is left alone
+- On a TTY, status words and `Error:` / `Warning:` prefixes are colored (`linked` green, `broken` red, `external` / `unlinked` / prefixes yellow); piped output and `--json` stay plain (set `NO_COLOR` to force plain output)
+- Paths in `enable` / `disable` / `sync` output are shown relative to the current directory when possible (`.skill-manager.json`, `.agents/skills/read`), else `~`-abbreviated (`~/.skill-manager.json`), else absolute
+
 ### Batch enable / disable
 
 `enable` and `disable` accept multiple skills in one invocation:

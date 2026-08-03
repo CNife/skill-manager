@@ -7,6 +7,7 @@ console_scripts target.
 from __future__ import annotations
 
 import json
+import os
 import sys
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -268,6 +269,74 @@ def _is_json(ctx: typer.Context) -> bool:
     return bool(ctx.obj and ctx.obj.get("json"))
 
 
+# ANSI foreground codes for human output, sharing the picker's palette
+# (cyan/green family). Progress lines never use these — only status words,
+# Error:/Warning: prefixes, and similar eye-stopping information.
+_ANSI_CODES: dict[str, str] = {
+    "green": "32",
+    "red": "31",
+    "yellow": "33",
+    "cyan": "36",
+}
+
+# Single actionable status word per list row -> color kind.
+_STATUS_COLORS: dict[str, str] = {
+    "linked": "green",
+    "broken": "red",
+    "external": "yellow",
+    "unlinked": "yellow",
+}
+
+
+def _color_enabled(*, stream: Any | None = None) -> bool:
+    """True when human output should carry ANSI colors.
+
+    Follows the no-color.org convention: ``NO_COLOR`` set (even empty)
+    disables color. Otherwise the destination stream must be a TTY —
+    piped/redirected output and CliRunner captures are never colored.
+    """
+    if os.environ.get("NO_COLOR") is not None:
+        return False
+    stream = sys.stdout if stream is None else stream
+    try:
+        return bool(stream.isatty())
+    except (AttributeError, OSError, ValueError):
+        return False
+
+
+def _color(text: str, kind: str | None, *, stream: Any | None = None) -> str:
+    """Wrap ``text`` in the ANSI color for ``kind`` when color is enabled.
+
+    Unknown kinds render plain; JSON output paths never call this. When
+    color is off the text is returned unchanged, so call sites can build
+    the string unconditionally.
+    """
+    code = _ANSI_CODES.get(kind) if kind else None
+    if code is None or not _color_enabled(stream=stream):
+        return text
+    return f"\x1b[{code}m{text}\x1b[0m"
+
+
+def _display_path(path: Path) -> str:
+    """Render a filesystem path for human output, shortest stable form.
+
+    Prefers a path relative to the current working directory
+    (``.skill-manager.json``, ``.agents/skills/read``), then ``~``
+    abbreviation under the home directory (``~/.skill-manager.json``), and
+    falls back to the absolute path. Purely cosmetic: JSON output never
+    uses it and error-message paths are not rewritten.
+    """
+    resolved = path.resolve()
+    try:
+        return str(resolved.relative_to(Path.cwd().resolve()))
+    except ValueError:
+        pass
+    try:
+        return f"~/{resolved.relative_to(Path.home().resolve())}"
+    except ValueError:
+        return str(path)
+
+
 def _scope_paths(ctx: typer.Context) -> tuple[Path, Path]:
     """Return (declaration_path, skills_dir) for the active scope.
 
@@ -362,7 +431,9 @@ def _fail(ctx: typer.Context, code: str, message: str, exit_code: int = 1) -> No
     if _is_json(ctx):
         _emit_json({"ok": False, "error": {"code": code, "message": message}})
     else:
-        typer.echo(f"Error: {message}", err=True)
+        typer.echo(
+            f"{_color('Error:', 'red', stream=sys.stderr)} {message}", err=True
+        )
     raise typer.Exit(exit_code)
 
 
@@ -485,7 +556,7 @@ def run_sync(
         link_result = links.ensure_link(skill, cache_root, skills_dir)
         result.links.append(LinkDone(name=skill.name, action=link_result.action))
         if emit is not None:
-            emit(f"{link_result.action} {skill.name} -> {link_result.target}")
+            emit(f"{link_result.action} {skill.name} -> {_display_path(link_result.target)}")
     return result
 
 
@@ -908,7 +979,7 @@ def _enable_interactive(
     global_names, warnings = _load_global_enabled_hint(project_config)
     if warnings and emit is not None:
         for w in warnings:
-            emit(f"Warning: {w['message']}")
+            emit(f"{_color('Warning:', 'yellow')} {w['message']}")
     global_set = set(global_names or {})
     skill_choices = sorted(
         [
@@ -1169,7 +1240,7 @@ def _enable_apply_batch(
     other_scope = project_hint if global_scope else global_hint
     if emit_hint_warnings and warnings and emit is not None:
         for w in warnings:
-            emit(f"Warning: {w['message']}")
+            emit(f"{_color('Warning:', 'yellow')} {w['message']}")
 
     # Validation pass — atomic: every failure aborts before any write.
     failures: list[str] = []
@@ -1220,8 +1291,8 @@ def _enable_apply_batch(
                 else:
                     _emit(
                         emit,
-                        f"Warning: Skill {skill_name!r} conflicts with the other scope's "
-                        f"declaration ({g[0]}:{g[1]}) — different source",
+                        f"{_color('Warning:', 'yellow')} Skill {skill_name!r} conflicts with "
+                        f"the other scope's declaration ({g[0]}:{g[1]}) — different source",
                     )
             outcomes.append(
                 EnableOutcome(
@@ -1234,7 +1305,11 @@ def _enable_apply_batch(
         skill_ref = SkillRef(name=skill_name, repo=skill_repo, path=skill_path)
         proj.skills.append(skill_ref)
         added_refs.append(skill_ref)
-        _emit(emit, f"Added {skill_name} ({skill_repo}:{skill_path}) to {project_config}")
+        _emit(
+            emit,
+            f"Added {skill_name} ({skill_repo}:{skill_path}) to "
+            f"{_display_path(project_config)}",
+        )
         if hint:
             # Validation guarantees the overlap is same-source at this point.
             _emit(
@@ -1276,7 +1351,11 @@ def _enable_apply_batch(
         for skill_ref in added_refs:
             link_result = links.ensure_link(skill_ref, cache_root, skills_dir)
             sync_result.links.append(LinkDone(name=skill_ref.name, action=link_result.action))
-            _emit(emit, f"{link_result.action} {skill_ref.name} -> {link_result.target}")
+            _emit(
+                emit,
+                f"{link_result.action} {skill_ref.name} -> "
+                f"{_display_path(link_result.target)}",
+            )
     return EnableResult(outcomes=outcomes, sync=sync_result, warnings=warnings)
 
 
@@ -1346,7 +1425,7 @@ def _disable_apply_batch(
             _emit(emit, f"Skill {name!r} not enabled")
             outcomes.append(DisableOutcome(action="not_enabled", skill={"name": name}))
             continue
-        _emit(emit, f"Removed {skill.name} from {project_config}")
+        _emit(emit, f"Removed {skill.name} from {_display_path(project_config)}")
         link_removed = _clean_link(cache_root, skills_dir, skill, emit)
         outcomes.append(
             DisableOutcome(
@@ -1377,12 +1456,15 @@ def _clean_link(
     target_path = (cache_root / skill.repo / skill.path).resolve()
     if link.is_symlink() and links.link_points_to(link, target_path):
         link.unlink()
-        _emit(emit, f"Removed symlink {link}")
+        _emit(emit, f"Removed symlink {_display_path(link)}")
         return True
     if link.is_symlink():
-        _emit(emit, f"Skipped {link}: points elsewhere (not managed by skill-manager)")
+        _emit(
+            emit,
+            f"Skipped {_display_path(link)}: points elsewhere (not managed by skill-manager)",
+        )
     elif link.exists():
-        _emit(emit, f"Skipped {link}: not a symlink")
+        _emit(emit, f"Skipped {_display_path(link)}: not a symlink")
     return False
 
 
@@ -1465,7 +1547,10 @@ def list_(ctx: typer.Context) -> None:
             _success(ctx, {"skills": skills_payload}, warnings=result.warnings or None)
         else:
             for w in result.warnings:
-                typer.echo(f"Warning: {w['message']}", err=True)
+                typer.echo(
+                    f"{_color('Warning:', 'yellow', stream=sys.stderr)} {w['message']}",
+                    err=True,
+                )
             if not result.skills and not result.source_rows:
                 typer.echo(
                     "No skills enabled yet. Try 'skill-manager enable' or "
@@ -1484,9 +1569,8 @@ def list_(ctx: typer.Context) -> None:
             if show_global_legend:
                 typer.echo("  (⊕ = also enabled globally, same source)")
             for s in result.skills:
-                # Human view keeps present/absent of source path (JSON omits it).
-                target_path = (paths.repos_cache_dir() / s.repo / s.path).resolve()
-                repo_present = target_path.is_dir()
+                # One actionable status word per row: linked (normal), unlinked/
+                # broken (fixable via sync), external (points elsewhere).
                 # ⚠ (cross-scope conflict) and ⊕ (benign same-source overlap)
                 # are mutually exclusive per row; pads keep columns aligned.
                 if s.global_conflict:
@@ -1499,7 +1583,7 @@ def list_(ctx: typer.Context) -> None:
                     name_cell = s.name
                 typer.echo(
                     f"  {name_cell}  {s.repo}:{s.path}  "
-                    f"{s.link}  {'present' if repo_present else 'absent'}"
+                    f"{_color(s.link, _STATUS_COLORS.get(s.link))}"
                 )
     except (ConfigError, SourceError, LinkError, NotFoundError, UsageError) as e:
         _handle_command_error(ctx, e)
@@ -1668,7 +1752,8 @@ def source_remove(ctx: typer.Context, repo: str) -> None:
         referenced_scopes = _referencing_scopes(repo)
         if referenced_scopes and not _is_json(ctx):
             typer.echo(
-                f"warning: {repo!r} still referenced by: {', '.join(referenced_scopes)} "
+                f"{_color('warning:', 'yellow', stream=sys.stderr)} {repo!r} still "
+                f"referenced by: {', '.join(referenced_scopes)} "
                 "(other projects not checked); links may break",
                 err=True,
             )
