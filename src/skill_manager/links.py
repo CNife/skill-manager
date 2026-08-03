@@ -40,7 +40,12 @@ def ensure_link(skill: SkillRef, cache_root: Path, skills_dir: Path) -> LinkResu
     Target is the absolute ``cache_root/<repo>/<path>`` directory. Returns a
     LinkResult: ``created`` (new), ``exists`` (already points to target), or
     ``skipped`` (occupied by an external symlink or non-symlink entry).
+    ``skill.name`` must be a single path component: a name that would escape
+    ``skills_dir`` (contains ``/`` or is ``.``/``..``) raises ``LinkError``
+    before any filesystem access.
     """
+    if "/" in skill.name or skill.name in (".", ".."):
+        raise LinkError(f"skill name {skill.name!r} is not a safe single link component")
     repo_root = (cache_root / skill.repo).resolve()
     target = (repo_root / skill.path).resolve()
     if not target.is_relative_to(repo_root):

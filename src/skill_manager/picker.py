@@ -77,7 +77,9 @@ class Picker(Protocol):
     def select_skills_to_enable(self, choices: Sequence[SkillChoice]) -> list[str]:
         """Multi-select skills to enable.
 
-        Returns names of checked, non-locked skills (may be empty = empty submit).
+        Returns the repo-internal paths of checked, non-locked skills (may be
+        empty = empty submit). Path is the row identity: same-named rows stay
+        distinguishable and each selection maps to exactly one path.
         Raises ``PickerCancelled`` on cancel.
         """
         ...
@@ -533,7 +535,7 @@ class QuestionaryPicker:
                 q_choices.append(
                     Choice(
                         title=title,
-                        value=c.name,
+                        value=c.path,
                         disabled=True,
                         checked=True,
                         description=c.description or None,
@@ -543,7 +545,7 @@ class QuestionaryPicker:
                 q_choices.append(
                     Choice(
                         title=title,
-                        value=c.name,
+                        value=c.path,
                         description=c.description or None,
                     )
                 )

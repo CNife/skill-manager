@@ -26,6 +26,7 @@ NOISE = skill_md("noise", "noise under skip dir")
 ROOT_SKILL = skill_md("root-skill", "repo root", body="# root\n")
 MISSING_DESC = "---\nname: nodesc\n---\n# nodesc\n"
 EMPTY_NAME = "---\nname: ''\ndescription: x\n---\n# x\n"
+EVIL_NAME = "---\nname: ../../evil\ndescription: evil skill\n---\n# evil\n"
 
 FILTERED_LAYOUT = {
     "skills/active": ACTIVE,
@@ -195,6 +196,27 @@ def test_json_available_skills_internal_non_bool_still_listed(
     assert ("plain", "skills/plain") not in keys
     assert ("broken", "skills/broken") not in keys
     assert ("nodesc", "skills/nodesc") not in keys
+
+
+def test_evil_name_skill_never_qualifies(tmp_path: Path, make_source_repo, monkeypatch) -> None:
+    """F2: an FM name escaping the skills-dir shape is treated as unqualified."""
+    project, _ = _seed_cached_source(tmp_path, make_source_repo, {"skills/evil": EVIL_NAME})
+    _write_config(project, [])
+    monkeypatch.chdir(project)
+    # Never listed, with or without --all (shape check is unconditional).
+    for args in (
+        ["--json", "source", "available-skills"],
+        ["--json", "source", "available-skills", "--all"],
+    ):
+        result = runner.invoke(app, args)
+        assert result.exit_code == 0, result.output
+        assert _parse_json(result)["data"]["skills"] == []
+    # enable cannot resolve it (not found, not a declaration write).
+    result = runner.invoke(app, ["--json", "enable", "tw93/Waza", "evil"])
+    assert result.exit_code == 1, result.output
+    body = _parse_json(result)
+    assert body["error"]["code"] == "not_found"
+    assert load_skill_declarations(project / ".skill-manager.json").skills == []
 
 
 def test_available_skills_human_default_omits_archive(tmp_path: Path, make_source_repo) -> None:
@@ -385,7 +407,7 @@ def test_enable_interactive_all_includes_archive_via_picker(
             names = {c.name for c in choices}
             assert "old" in names
             assert "active" in names
-            return ["old"]
+            return [".archive/old"]
 
         def select_skills_to_disable(self, names):
             raise AssertionError("not used")

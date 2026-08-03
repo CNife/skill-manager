@@ -156,7 +156,7 @@ def test_global_enable_interactive(tmp_path: Path, make_source_repo) -> None:
 
         def select_skills_to_enable(self, choices):
             assert any(c.name == "read" for c in choices)
-            return ["read"]
+            return ["skills/read"]
 
         def select_skills_to_disable(self, names):
             raise AssertionError("not used")

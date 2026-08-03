@@ -41,7 +41,11 @@ def _env(tmp_path: Path, make_source_repo, skills: dict[str, str] | None = None)
 
 
 class FakePicker:
-    """Scripted picker: queues return values / cancellations per call."""
+    """Scripted picker: queues return values / cancellations per call.
+
+    ``enable_names`` holds repo-internal paths (the protocol's return value):
+    selecting row ``x`` means returning ``"x"``'s ``path``.
+    """
 
     def __init__(
         self,
@@ -226,7 +230,7 @@ def test_enable_selects_and_syncs_once(tmp_path: Path, make_source_repo) -> None
         cache,
         skills_dir,
         url_resolver=lambda _r: f"file://{upstream}",
-        picker=FakePicker(source="tw93/Waza", enable_names=["write", "read"]),
+        picker=FakePicker(source="tw93/Waza", enable_names=["skills/write", "skills/read"]),
     )
     assert [o.action for o in result.outcomes] == ["enabled", "enabled"]
     assert [o.skill["name"] for o in result.outcomes] == ["write", "read"]
@@ -301,7 +305,8 @@ def test_enable_unqualified_enabled_absent_from_list(tmp_path: Path, make_source
     assert "stale" not in names
 
 
-def test_enable_same_name_dedupe_first_path(tmp_path: Path, make_source_repo) -> None:
+def test_enable_same_name_selects_second_path(tmp_path: Path, make_source_repo) -> None:
+    """F5: checking the second same-name row enables that row's path, not the first."""
     project, cache, gconfig, skills_dir, upstream = _env(
         tmp_path,
         make_source_repo,
@@ -317,10 +322,36 @@ def test_enable_same_name_dedupe_first_path(tmp_path: Path, make_source_repo) ->
         cache,
         skills_dir,
         url_resolver=lambda _r: f"file://{upstream}",
-        picker=FakePicker(source="tw93/Waza", enable_names=["dup", "dup"]),
+        picker=FakePicker(source="tw93/Waza", enable_names=["b/dup"]),
     )
-    assert len(result.outcomes) == 1
-    assert result.outcomes[0].skill["path"] == "a/dup"
+    assert [o.skill["path"] for o in result.outcomes] == ["b/dup"]
+    proj = load_skill_declarations(project / ".skill-manager.json")
+    assert [(s.name, s.path) for s in proj.skills] == [("dup", "b/dup")]
+
+
+def test_enable_same_name_both_rows_conflict_error(tmp_path: Path, make_source_repo) -> None:
+    """F1: checking both same-name rows at different paths errors; no writes."""
+    project, cache, gconfig, skills_dir, upstream = _env(
+        tmp_path,
+        make_source_repo,
+        {
+            "a/dup": skill_md("dup", "first"),
+            "b/dup": skill_md("dup", "second"),
+        },
+    )
+    _write_config(project, [])
+    before = (project / ".skill-manager.json").read_text()
+    with pytest.raises(NotFoundError):
+        run_enable(
+            project / ".skill-manager.json",
+            gconfig,
+            cache,
+            skills_dir,
+            url_resolver=lambda _r: f"file://{upstream}",
+            picker=FakePicker(source="tw93/Waza", enable_names=["a/dup", "b/dup"]),
+        )
+    assert (project / ".skill-manager.json").read_text() == before
+    assert not (skills_dir / "dup").exists()
 
 
 def test_disable_no_enabled_exit_ok(tmp_path: Path) -> None:

@@ -59,6 +59,16 @@ def test_ensure_link_skips_real_directory(tmp_path: Path) -> None:
     assert not (skills_dir / "read").is_symlink()
 
 
+def test_ensure_link_rejects_escaping_name(tmp_path: Path) -> None:
+    """F2: a link name escaping skills_dir is refused, never created outside it."""
+    cache = tmp_path / "cache" / "repos"
+    _make_skill(cache, "tw93/Waza", "skills/read")
+    skills_dir = tmp_path / "proj" / ".agents" / "skills"
+    with pytest.raises(LinkError, match="name"):
+        ensure_link(SkillRef("../../evil", "tw93/Waza", "skills/read"), cache, skills_dir)
+    assert not (tmp_path / "evil").exists()
+
+
 def test_ensure_link_path_not_found(tmp_path: Path) -> None:
     cache = tmp_path / "cache" / "repos"
     cache.mkdir(parents=True)

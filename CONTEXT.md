@@ -51,3 +51,28 @@ _Avoid_: add, install, 添加, 安装
 **disable / 禁用**:
 从当前 Scope 的技能声明文件移除一条或多条 Skill declaration 并清理对应 Link；TTY 下可交互多选已启用项，也可 `disable <name>…` 非交互批量禁用（宽松：未启用的名字为幂等 no-op）。
 _Avoid_: remove, uninstall, 删除, 卸载
+
+## Dual-scope model
+
+Two declaration scopes share one model, one Source cache, and one Global config
+(Sources are global by design; only declarations and Links are per-scope):
+
+- **Project scope** (default): `./.skill-manager.json` + `./.agents/skills/`. The
+  declaration is **team-shared** — it is committed with the repo and answers
+  "which Skills does this project need for everyone working on it?".
+- **Global scope** (`--global`, the user's home): `~/.skill-manager.json` +
+  `~/.agents/skills/`. The declaration is **personal preference** — it answers
+  "which Skills do I want everywhere, independent of any project?".
+
+Same-name overlap across scopes is a **supported scenario** when both scopes
+reference the same Source (same repo and path): the project declares a Skill for
+its collaborators while the user declares the same Skill globally for
+themselves. `list` marks this benign overlap with `⊕`; interactive `enable`
+keeps the neutral hint "also enabled globally (same source) — no conflict".
+Overlap from *different* Sources is a conflict: `enable` hard-errors with a
+resolution hint in both directions (project and `--global`).
+
+**Cache invariant**: only `sync` and `source update` may *update* already
+cached content. `enable <repo> <name>` and `source add` may clone a missing
+Source into the cache and register it in the Global config, but they never pull
+— an existing cached clone is left untouched.

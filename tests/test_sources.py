@@ -87,6 +87,16 @@ def test_pull_source_missing_cache_raises(tmp_path: Path) -> None:
         pull_source("x/y", cfg, cache)
 
 
+def test_clone_source_rejects_path_escape(tmp_path: Path) -> None:
+    """F3: a repo identifier escaping the cache root is refused before any git call."""
+    cache = tmp_path / "cache" / "repos"
+    cfg = GlobalConfig()
+    with pytest.raises(SourceError, match="escapes"):
+        clone_source("../../evil", cfg, cache, url="file:///nonexistent")
+    assert not (tmp_path / "evil").exists()
+    assert cfg.sources == {}
+
+
 def test_clone_source_git_failure(tmp_path: Path) -> None:
     cache = tmp_path / "cache" / "repos"
     cfg = GlobalConfig()

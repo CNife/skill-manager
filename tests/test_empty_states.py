@@ -159,6 +159,45 @@ def test_list_global_bad_json_no_project_config_wording(
     assert "project config" not in result.output
 
 
+# ── empty states: missing declaration = empty config (disable) ────────────────
+
+
+def test_disable_global_missing_config_empty_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``--global disable`` with no global declaration file: idempotent no-op."""
+    monkeypatch.chdir(tmp_path)
+    result = runner.invoke(app, ["--global", "disable", "read"])
+    assert result.exit_code == 0, result.output
+    assert "not enabled" in result.output
+    assert "project config" not in result.output
+    jresult = runner.invoke(app, ["--json", "--global", "disable", "read"])
+    assert jresult.exit_code == 0, jresult.output
+    assert _parse_json(jresult) == {
+        "ok": True,
+        "data": {"results": [{"action": "not_enabled", "skill": {"name": "read"}}]},
+    }
+
+
+def test_disable_global_bad_json_no_project_config_wording(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Global-scope disable error wording names the global config, never 'project config'."""
+    monkeypatch.chdir(tmp_path)
+    paths.global_skills_config_path().write_text(json.dumps({"skills": 42}), encoding="utf-8")
+    result = runner.invoke(app, ["--global", "disable", "read"])
+    assert result.exit_code == 1
+    assert "global skills config" in result.output
+    assert "project config" not in result.output
+    jresult = runner.invoke(app, ["--json", "--global", "disable", "read"])
+    assert jresult.exit_code == 1
+    body = _parse_json(jresult)
+    assert body["ok"] is False
+    assert body["error"]["code"] == "config_error"
+    assert "global skills config" in body["error"]["message"]
+    assert "project config" not in body["error"]["message"]
+
+
 # ── source list empty state ───────────────────────────────────────────────────
 
 

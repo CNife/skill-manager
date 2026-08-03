@@ -166,6 +166,55 @@ def test_display_path_absolute_fallback(tmp_path: Path, monkeypatch: pytest.Monk
     assert _display_path(outside) == str(outside.resolve())
 
 
+def test_display_path_symlink_shows_link_itself(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """F6: a symlink under the project displays as the link, not its target."""
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    monkeypatch.chdir(proj)
+    elsewhere = proj / "elsewhere"
+    elsewhere.mkdir()
+    (elsewhere / "SKILL.md").write_text("# other\n", encoding="utf-8")
+    link = proj / ".agents" / "skills" / "read"
+    link.parent.mkdir(parents=True)
+    link.symlink_to(elsewhere)
+    assert _display_path(link) == ".agents/skills/read"
+
+
+def test_disable_skip_external_symlink_shows_link_path(
+    tmp_path: Path, make_source_repo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """F6: disable skip message names the link itself, not its resolved target."""
+    from skill_manager.cli import run_disable
+
+    project = tmp_path / "proj"
+    project.mkdir()
+    monkeypatch.chdir(project)
+    cache = tmp_path / "repos"
+    gconfig = tmp_path / "config.json"
+    skills_dir = project / ".agents" / "skills"
+    skills_dir.mkdir(parents=True)
+    elsewhere = project / "elsewhere"
+    elsewhere.mkdir()
+    (elsewhere / "SKILL.md").write_text("# other\n", encoding="utf-8")
+    (skills_dir / "read").symlink_to(elsewhere)
+    _write_config(project, [{"name": "read", "repo": "tw93/Waza", "path": "skills/read"}])
+    messages: list[str] = []
+    run_disable(
+        project / ".skill-manager.json",
+        gconfig,
+        cache,
+        skills_dir,
+        names=["read"],
+        emit=messages.append,
+    )
+    skip = [m for m in messages if m.startswith("Skipped")]
+    assert skip, messages
+    assert skip[0].startswith("Skipped .agents/skills/read")
+    assert not skip[0].startswith("Skipped elsewhere")
+
+
 # ── b. list single status column ──────────────────────────────────────────────
 
 
@@ -269,9 +318,7 @@ def test_enable_cross_scope_warning_yellow(tmp_path: Path, make_source_repo, mon
     _write_config(project, [{"name": "read", "repo": "tw93/Waza", "path": "skills/read"}])
     paths.global_skills_config_path().parent.mkdir(parents=True, exist_ok=True)
     paths.global_skills_config_path().write_text(
-        json.dumps(
-            {"skills": [{"name": "read", "repo": "other/Repo", "path": "skills/read"}]}
-        ),
+        json.dumps({"skills": [{"name": "read", "repo": "other/Repo", "path": "skills/read"}]}),
         encoding="utf-8",
     )
     lines: list[str] = []
@@ -331,9 +378,7 @@ def test_json_error_envelope_never_ansi(tmp_path: Path, monkeypatch: pytest.Monk
 # ── c. display path end-to-end ────────────────────────────────────────────────
 
 
-def test_enable_project_scope_relative_paths(
-    tmp_path: Path, make_source_repo, monkeypatch
-) -> None:
+def test_enable_project_scope_relative_paths(tmp_path: Path, make_source_repo, monkeypatch) -> None:
     project, _head = _seed_cached_source(tmp_path, make_source_repo)
     _write_config(project, [])
     monkeypatch.chdir(project)
@@ -383,6 +428,4 @@ def test_sync_link_target_relative_when_cache_under_cwd(
     monkeypatch.chdir(project)
     result = runner.invoke(app, ["sync"])
     assert result.exit_code == 0, result.output
-    assert (
-        "created read -> .cache/skill-manager/repos/tw93/Waza/skills/read" in result.output
-    )
+    assert "created read -> .cache/skill-manager/repos/tw93/Waza/skills/read" in result.output

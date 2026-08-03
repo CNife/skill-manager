@@ -227,7 +227,7 @@ class _PickAll:
         return choices[0].repo
 
     def select_skills_to_enable(self, choices):
-        return [c.name for c in choices if not c.locked]
+        return [c.path for c in choices if not c.locked]
 
     def select_skills_to_disable(self, names):
         return list(names)

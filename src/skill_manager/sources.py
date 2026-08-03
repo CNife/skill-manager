@@ -55,6 +55,8 @@ def clone_source(
     """
     actual_url = url if url is not None else repo_url(repo)
     dest = cache_root / repo
+    if not dest.resolve().is_relative_to(cache_root.resolve()):
+        raise SourceError(f"repo {repo!r} escapes the cache directory (must be 'owner/repo')")
     if not dest.exists():
         dest.parent.mkdir(parents=True, exist_ok=True)
         _run_git(["clone", "--quiet", actual_url, str(dest)])

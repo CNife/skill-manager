@@ -11,7 +11,7 @@ import os
 import sys
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Annotated, Any
 
 import typer
@@ -323,16 +323,19 @@ def _display_path(path: Path) -> str:
     Prefers a path relative to the current working directory
     (``.skill-manager.json``, ``.agents/skills/read``), then ``~``
     abbreviation under the home directory (``~/.skill-manager.json``), and
-    falls back to the absolute path. Purely cosmetic: JSON output never
-    uses it and error-message paths are not rewritten.
+    falls back to the absolute path. The path is shown as given — a symlink
+    displays as the link itself, never resolved to its target. Purely
+    cosmetic: JSON output never uses it and error-message paths are not
+    rewritten.
     """
-    resolved = path.resolve()
+    cwd = Path.cwd()
     try:
-        return str(resolved.relative_to(Path.cwd().resolve()))
+        return str(path.relative_to(cwd))
     except ValueError:
         pass
+    home = Path.home()
     try:
-        return f"~/{resolved.relative_to(Path.home().resolve())}"
+        return f"~/{path.relative_to(home)}"
     except ValueError:
         return str(path)
 
@@ -431,9 +434,7 @@ def _fail(ctx: typer.Context, code: str, message: str, exit_code: int = 1) -> No
     if _is_json(ctx):
         _emit_json({"ok": False, "error": {"code": code, "message": message}})
     else:
-        typer.echo(
-            f"{_color('Error:', 'red', stream=sys.stderr)} {message}", err=True
-        )
+        typer.echo(f"{_color('Error:', 'red', stream=sys.stderr)} {message}", err=True)
     raise typer.Exit(exit_code)
 
 
@@ -791,6 +792,11 @@ def _qualify_skill(skill_md: Path) -> tuple[str, str, bool] | None:
     description = fields.get("description", "").strip()
     if not name or not description:
         return None
+    # Shape guard (same rule as config): the discovery name must be a single
+    # path component, never a path like ``../../evil`` that would escape the
+    # skills directory when linked.
+    if PurePosixPath(name).name != name or name in (".", ".."):
+        return None
     return name, description, _metadata_internal_is_true(fm_lines)
 
 
@@ -896,6 +902,7 @@ def run_enable(
         raise click.exceptions.UsageError(
             "enable requires REPO and at least one NAME, or neither for interactive mode"
         )
+    config.validate_repo(repo, "enable")
     return _enable_noninteractive(
         project_config,
         global_config_path,
@@ -994,23 +1001,23 @@ def _enable_interactive(
         ],
         key=lambda c: c.name,
     )
-    selected_names = ui.select_skills_to_enable(skill_choices)
+    selected_paths = ui.select_skills_to_enable(skill_choices)
 
-    # Map selected names to first matching path in scan order; skip locked;
-    # dedupe by name keeping first-in-list order.
-    path_by_name: dict[str, str] = {}
-    for s in skills:
-        path_by_name.setdefault(s.name, s.path)
-
+    # Selection carries path identity: each picked path maps to exactly one
+    # row (same-named rows are distinct). Skip locked and unknown paths,
+    # dedupe by path keeping first-pick order. Same-name rows at different
+    # paths checked together are rejected by _enable_apply_batch (F1 rules).
+    by_path: dict[str, SkillChoice] = {c.path: c for c in skill_choices}
     resolved: list[tuple[str, str, str]] = []
     seen: set[str] = set()
-    for name in selected_names:
-        if name in locked or name in seen:
+    for path in selected_paths:
+        choice = by_path.get(path)
+        if choice is None or choice.locked:
             continue
-        if name not in path_by_name:
+        if path in seen:
             continue
-        seen.add(name)
-        resolved.append((name, selected_repo, path_by_name[name]))
+        seen.add(path)
+        resolved.append((choice.name, selected_repo, choice.path))
 
     if not resolved:
         _emit(emit, "Nothing to enable.")
@@ -1062,6 +1069,7 @@ def _enable_noninteractive(
     resolved: list[tuple[str, str, str]] = []
     failures: list[str] = []
     has_not_found = False
+    cloned_repos: set[str] = set()
 
     if repo is None:
         # Repo-less: scan every cached source once (no cloning).
@@ -1101,15 +1109,18 @@ def _enable_noninteractive(
     else:
         repo_dir = cache_root / repo
         if not repo_dir.is_dir():
-            # enable may clone a missing source (never pull). Registration in
-            # the global config happens later in _enable_apply_batch, which
-            # reloads from disk; this in-memory registration is only for
-            # clone_source's contract.
+            # enable may clone a missing source (never pull). Registration is
+            # persisted right after the clone so a later batch failure cannot
+            # orphan the cache: the source stays visible to ``source list`` and
+            # removable via ``source remove``. _enable_apply_batch reloads from
+            # disk and saves again (idempotent, harmless).
             global_cfg = config.load_global_config(global_config_path)
             resolver = url_resolver or sources.repo_url
             _emit(emit, f"cloning {repo}...")
             head = sources.clone_source(repo, global_cfg, cache_root, url=resolver(repo))
             _emit(emit, f"cloned {repo} ({head[:8]})")
+            config.save_global_config(global_config_path, global_cfg)
+            cloned_repos.add(repo)
             repo_dir = cache_root / repo
         available = _scan_skills(repo_dir, repo, include_all=include_all)
         by_name_scan: dict[str, list[ScannedSkill]] = {}
@@ -1198,6 +1209,7 @@ def _enable_noninteractive(
         resolved=resolved,
         url_resolver=url_resolver,
         emit=emit,
+        cloned_repos=cloned_repos,
     )
 
 
@@ -1212,6 +1224,7 @@ def _enable_apply_batch(
     emit: Callable[[str], None] | None,
     cross_hint: tuple[dict[str, tuple[str, str]] | None, list[dict[str, str]]] | None = None,
     emit_hint_warnings: bool = True,
+    cloned_repos: set[str] | None = None,
 ) -> EnableResult:
     """Commit a validated, deduped batch of ``(name, repo, path)`` skills.
 
@@ -1242,16 +1255,31 @@ def _enable_apply_batch(
         for w in warnings:
             emit(f"{_color('Warning:', 'yellow')} {w['message']}")
 
-    # Validation pass — atomic: every failure aborts before any write.
+    # Validation pass — atomic: every failure aborts before any write. Also
+    # dedupes the batch: a name accepted once (recorded in ``batch_added``)
+    # that reappears with the same (repo, path) is silently kept once;
+    # reappearing with a different (repo, path) is a scope-internal conflict.
     failures: list[str] = []
+    accepted: list[tuple[str, str, str]] = []
+    batch_added: dict[str, tuple[str, str]] = {}
     for skill_name, skill_repo, skill_path in resolved:
         existing = enabled.get(skill_name)
         if existing is not None:
             if existing.repo == skill_repo and existing.path == skill_path:
+                accepted.append((skill_name, skill_repo, skill_path))
                 continue
             failures.append(
                 f"skill {skill_name!r} is already enabled from {existing.repo}:{existing.path}; "
                 f"disable it first: skill-manager disable {skill_name}"
+            )
+            continue
+        first = batch_added.get(skill_name)
+        if first is not None:
+            if first == (skill_repo, skill_path):
+                continue  # same skill via another arg form: keep the first
+            failures.append(
+                f"skill {skill_name!r} is requested from both {first[0]}:{first[1]} and "
+                f"{skill_repo}:{skill_path} in this batch; enable one form only"
             )
             continue
         g = other_scope.get(skill_name) if other_scope is not None else None
@@ -1269,12 +1297,15 @@ def _enable_apply_batch(
                     f"enabling {skill_repo}:{skill_path} would create a cross-scope name "
                     f"conflict; disable it first: skill-manager --global disable {skill_name}"
                 )
+            continue
+        batch_added[skill_name] = (skill_repo, skill_path)
+        accepted.append((skill_name, skill_repo, skill_path))
     if failures:
         raise NotFoundError("; ".join(failures))
 
     outcomes: list[EnableOutcome] = []
     added_refs: list[SkillRef] = []
-    for skill_name, skill_repo, skill_path in resolved:
+    for skill_name, skill_repo, skill_path in accepted:
         # Conflict checks use the other scope; the outcome hint keeps forward
         # (global) semantics and is omitted in global scope.
         g = other_scope.get(skill_name) if other_scope is not None else None
@@ -1307,8 +1338,7 @@ def _enable_apply_batch(
         added_refs.append(skill_ref)
         _emit(
             emit,
-            f"Added {skill_name} ({skill_repo}:{skill_path}) to "
-            f"{_display_path(project_config)}",
+            f"Added {skill_name} ({skill_repo}:{skill_path}) to {_display_path(project_config)}",
         )
         if hint:
             # Validation guarantees the overlap is same-source at this point.
@@ -1335,15 +1365,17 @@ def _enable_apply_batch(
             if skill_ref.repo in seen_repos:
                 continue
             seen_repos.add(skill_ref.repo)
-            was_registered = skill_ref.repo in global_cfg.sources
+            # "cloned" reports an actual cache fill by this run (clone_source
+            # never pulls, so a source not in cloned_repos was already cached).
             head = sources.clone_source(
                 skill_ref.repo, global_cfg, cache_root, url=resolver(skill_ref.repo)
             )
+            action = "cloned" if (cloned_repos and skill_ref.repo in cloned_repos) else "up_to_date"
             ensured_sources.append(
                 SourceEnsured(
                     repo=skill_ref.repo,
                     commit=head,
-                    action="up_to_date" if was_registered else "cloned",
+                    action=action,
                 )
             )
         config.save_global_config(global_config_path, global_cfg)
@@ -1353,8 +1385,7 @@ def _enable_apply_batch(
             sync_result.links.append(LinkDone(name=skill_ref.name, action=link_result.action))
             _emit(
                 emit,
-                f"{link_result.action} {skill_ref.name} -> "
-                f"{_display_path(link_result.target)}",
+                f"{link_result.action} {skill_ref.name} -> {_display_path(link_result.target)}",
             )
     return EnableResult(outcomes=outcomes, sync=sync_result, warnings=warnings)
 
@@ -1372,7 +1403,10 @@ def run_disable(
     """Disable one or more skills (interactive when ``names`` is empty).
 
     Lenient: disabling a name that is not enabled is an idempotent no-op
-    reported per name, never an error. Declarations are removed and the config
+    reported per name, never an error. A missing declaration file is treated
+    as empty (same as ``list``/``sync``), so disabling in a fresh scope is a
+    no-op rather than an error; malformed content still raises ConfigError
+    worded for the active scope. Declarations are removed and the config
     saved once for the whole batch.
 
     ``picker`` is the interactive adapter (default: questionary UI). Cancel
@@ -1380,7 +1414,7 @@ def run_disable(
     """
     del global_config_path  # shared signature with other runners; unused here
     names = list(names or [])
-    proj = config.load_skill_declarations(project_config)
+    proj = _load_declarations_for_list_sync(project_config)
 
     if not names:
         if not proj.skills:

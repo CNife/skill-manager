@@ -137,9 +137,7 @@ def load_skill_declarations(path: Path, label: str = "project config") -> SkillD
     except json.JSONDecodeError as e:
         raise ConfigError(f"invalid JSON in {path}: {e}") from e
     if not isinstance(data, dict):
-        raise ConfigError(
-            f"{label} must be a JSON object in {path}, got {type(data).__name__}"
-        )
+        raise ConfigError(f"{label} must be a JSON object in {path}, got {type(data).__name__}")
     skills_raw = data.get("skills")
     if not isinstance(skills_raw, list):
         raise ConfigError(f"{label} missing 'skills' list in {path}")

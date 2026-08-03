@@ -192,6 +192,62 @@ def test_run_enable_batch_dedupe(tmp_path: Path, make_source_repo) -> None:
     assert [s.name for s in proj.skills] == ["read", "write"]
 
 
+def test_run_enable_batch_name_and_path_forms_same_skill_dedupe(
+    tmp_path: Path, make_source_repo
+) -> None:
+    """F1: name form + path form resolving to the same skill write one declaration."""
+    project, cache, gconfig, skills_dir, upstream = _enable_env(tmp_path, make_source_repo)
+    _write_config(project, [])
+    from skill_manager.cli import run_enable
+
+    result = run_enable(
+        project / ".skill-manager.json",
+        gconfig,
+        cache,
+        skills_dir,
+        repo="tw93/Waza",
+        names=["read", "skills/read"],
+        url_resolver=lambda _r: f"file://{upstream}",
+    )
+    assert [o.skill["name"] for o in result.outcomes] == ["read"]
+    proj = load_skill_declarations(project / ".skill-manager.json")
+    assert [(s.name, s.repo, s.path) for s in proj.skills] == [("read", "tw93/Waza", "skills/read")]
+    assert (skills_dir / "read").is_symlink()
+
+
+def test_run_enable_batch_same_name_different_paths_atomic_error(
+    tmp_path: Path, make_source_repo
+) -> None:
+    """F1: two args resolving to the same name at different paths abort atomically."""
+    project, cache, gconfig, skills_dir, upstream = _enable_env(
+        tmp_path,
+        make_source_repo,
+        {
+            "a/dup": skill_md("dup", "first"),
+            "b/dup": skill_md("dup", "second"),
+        },
+    )
+    _write_config(project, [])
+    from skill_manager.cli import NotFoundError, run_enable
+
+    with pytest.raises(NotFoundError) as exc:
+        run_enable(
+            project / ".skill-manager.json",
+            gconfig,
+            cache,
+            skills_dir,
+            repo="tw93/Waza",
+            names=["a/dup", "b/dup"],
+            url_resolver=lambda _r: f"file://{upstream}",
+        )
+    msg = str(exc.value)
+    assert "dup" in msg
+    assert "a/dup" in msg and "b/dup" in msg
+    # Atomic: nothing was written.
+    assert load_skill_declarations(project / ".skill-manager.json").skills == []
+    assert not (skills_dir / "dup").exists()
+
+
 # ── run_disable batch ─────────────────────────────────────────────────────────
 
 
@@ -209,6 +265,60 @@ def _disable_env(tmp_path: Path, make_source_repo, enabled: list[str]):
         url_resolver=lambda _r: f"file://{upstream}",
     )
     return project, cache, gconfig, skills_dir
+
+
+# ── repo validation + clone registration (issues F3/F4) ─────────────────────────
+
+
+def test_run_enable_malicious_repo_rejected(tmp_path: Path) -> None:
+    """F3: a repo identifier escaping the cache root is rejected before cloning."""
+    from skill_manager.cli import run_enable
+    from skill_manager.config import ConfigError
+
+    project = tmp_path / "proj"
+    project.mkdir()
+    cache = tmp_path / "repos"
+    escape_target = (cache / "../../tmp" / "x").resolve()
+    with pytest.raises(ConfigError, match="invalid repo"):
+        run_enable(
+            project / ".skill-manager.json",
+            tmp_path / "config.json",
+            cache,
+            project / ".agents" / "skills",
+            repo="../../tmp/x",
+            names=["w"],
+            url_resolver=lambda _r: "file:///nonexistent",
+        )
+    assert not escape_target.exists()
+
+
+def test_run_enable_batch_failure_registers_cloned_source(tmp_path: Path, make_source_repo) -> None:
+    """F4: a failed batch keeps the clone's global-config registration (no orphan)."""
+    from skill_manager.cli import NotFoundError, run_enable
+
+    upstream = make_source_repo("waza", {"skills/read": skill_md("read")})
+    project = tmp_path / "proj"
+    project.mkdir()
+    cache = tmp_path / "repos"
+    gconfig = tmp_path / "config.json"
+    skills_dir = project / ".agents" / "skills"
+    _write_config(project, [])
+    with pytest.raises(NotFoundError, match="typoX"):
+        run_enable(
+            project / ".skill-manager.json",
+            gconfig,
+            cache,
+            skills_dir,
+            repo="tw93/Waza",
+            names=["read", "typoX"],
+            url_resolver=lambda _r: f"file://{upstream}",
+        )
+    # Atomic for declarations: nothing enabled.
+    assert load_skill_declarations(project / ".skill-manager.json").skills == []
+    # But the clone is registered, so it is visible/removable via source commands.
+    cfg = load_global_config(gconfig)
+    assert "tw93/Waza" in cfg.sources
+    assert (cache / "tw93" / "Waza" / ".git").is_dir()
 
 
 def test_run_disable_batch_multiple(tmp_path: Path, make_source_repo) -> None:
