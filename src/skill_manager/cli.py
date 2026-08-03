@@ -76,6 +76,8 @@ class SkillStatus:
     link: str  # linked | broken | external | unlinked
     # None = omit key (global scope); bool = project-scope cross-hint.
     enabled_globally: bool | None = None
+    # True when the same name is enabled globally from a *different* source.
+    global_conflict: bool = False
 
 
 @dataclass
@@ -493,24 +495,57 @@ def _is_global_scope(declaration_path: Path) -> bool:
 
 def _load_global_enabled_hint(
     declaration_path: Path,
-) -> tuple[frozenset[str] | None, list[dict[str, str]]]:
-    """Load global skill names for the project→global non-blocking hint.
+) -> tuple[dict[str, tuple[str, str]] | None, list[dict[str, str]]]:
+    """Load global skill declarations as ``name -> (repo, path)``.
 
     Returns ``(None, [])`` when the active scope *is* global (omit the field).
-    For project scope, returns ``(names, warnings)`` where missing file ≡ empty
-    names, and an unreadable/malformed global declaration yields empty names plus
-    a soft ``global_config_error`` warning (command continues).
+    For project scope: missing global file ≡ empty mapping, and an
+    unreadable/malformed global declaration yields an empty mapping plus a
+    soft ``global_config_error`` warning (command continues). Carrying the
+    repo lets callers tell same-source overlaps from cross-source conflicts.
     """
     if _is_global_scope(declaration_path):
         return None, []
     global_decl = paths.global_skills_config_path()
     if not global_decl.is_file():
-        return frozenset(), []
+        return {}, []
     try:
         decl = config.load_skill_declarations(global_decl)
     except (ConfigError, OSError, UnicodeDecodeError) as exc:
-        return frozenset(), [{"code": "global_config_error", "message": str(exc)}]
-    return frozenset(s.name for s in decl.skills), []
+        return {}, [{"code": "global_config_error", "message": str(exc)}]
+    mapping: dict[str, tuple[str, str]] = {}
+    for skill in decl.skills:
+        mapping.setdefault(skill.name, (skill.repo, skill.path))
+    return mapping, []
+
+
+def _load_project_hint(declaration_path: Path) -> dict[str, tuple[str, str]] | None:
+    """Reverse-direction hint for ``--global`` enable (boundary: cwd only).
+
+    When the active declaration is the user-global file, the *other* scope is
+    the cwd project: returns its skills as ``name -> (repo, path)``. Returns
+    ``None`` when the active scope is not global, or when cwd is the user's
+    home (the two declaration files coincide — there is no separate project
+    scope). A missing or unreadable cwd project file yields an empty mapping:
+    the reverse check degrades to none. Only the cwd project is ever
+    inspected; other projects on disk are out of scope by design (documented
+    boundary for the --global reverse check).
+    """
+    if not _is_global_scope(declaration_path):
+        return None
+    other = paths.project_config_path()
+    if other.resolve() == paths.global_skills_config_path().resolve():
+        return None
+    if not other.is_file():
+        return {}
+    try:
+        decl = config.load_skill_declarations(other)
+    except (ConfigError, OSError, UnicodeDecodeError):
+        return {}
+    mapping: dict[str, tuple[str, str]] = {}
+    for skill in decl.skills:
+        mapping.setdefault(skill.name, (skill.repo, skill.path))
+    return mapping
 
 
 def run_list(
@@ -529,16 +564,33 @@ def run_list(
         head = src.commit[:8] if src else "-"
         source_rows.append((repo, head, "cached" if cached else "missing"))
     global_names, warnings = _load_global_enabled_hint(project_config)
-    skill_statuses = [
-        SkillStatus(
-            name=skill.name,
-            repo=skill.repo,
-            path=skill.path,
-            link=_link_status(skill, cache_root, skills_dir),
-            enabled_globally=(skill.name in global_names) if global_names is not None else None,
+    skill_statuses: list[SkillStatus] = []
+    for skill in proj.skills:
+        global_hit = global_names.get(skill.name) if global_names is not None else None
+        conflict = global_hit is not None and global_hit[0] != skill.repo
+        skill_statuses.append(
+            SkillStatus(
+                name=skill.name,
+                repo=skill.repo,
+                path=skill.path,
+                link=_link_status(skill, cache_root, skills_dir),
+                enabled_globally=(global_hit is not None if global_names is not None else None),
+                global_conflict=conflict,
+            )
         )
-        for skill in proj.skills
-    ]
+        if conflict:
+            # Pre-existing cross-scope conflicts warn but never hard-fail
+            # (migration-friendly: list/sync stay usable).
+            warnings.append(
+                {
+                    "code": "global_conflict",
+                    "message": (
+                        f"skill {skill.name!r} is enabled in the global scope from a different "
+                        f"source ({global_hit[0]}:{global_hit[1]}); disable one side to "
+                        "resolve the conflict"
+                    ),
+                }
+            )
     return ListResult(skills=skill_statuses, source_rows=source_rows, warnings=warnings)
 
 
@@ -706,13 +758,21 @@ def run_enable(
 
     Non-interactive (batch) when ``repo`` and at least one name are provided.
     Interactive when both are omitted. ``repo`` without names is a usage error.
-    ``include_all`` widens Source skill discovery (hidden / internal). The batch
-    is atomic: if any requested name is invalid, nothing is applied.
+
+    Repo-less form: a repo identifier is always ``owner/repo`` (contains
+    ``/``), so a slash-less first positional argument is treated as the first
+    skill name and every name is resolved across all cached sources.
+    ``include_all`` widens Source skill discovery (hidden / internal). The
+    batch is atomic: if any requested name is invalid, nothing is applied.
 
     ``picker`` is the interactive adapter (default: questionary UI). Tests inject
     a fake. Cancel raises ``PickerCancelled``.
     """
     names = list(names or [])
+    if repo is not None and "/" not in repo:
+        # Repo-less mode: the first positional argument is the first name.
+        names = [repo, *names]
+        repo = None
     if repo is None and not names:
         return _enable_interactive(
             project_config,
@@ -724,7 +784,24 @@ def run_enable(
             emit=emit,
             picker=picker,
         )
-    if repo is None or not names:
+    if repo is None:
+        if any("/" in name for name in names):
+            raise click.exceptions.UsageError(
+                "enable in name-resolution mode takes skill names only (no '/' arguments); "
+                "use 'enable <repo> <name>' to target a specific source"
+            )
+        return _enable_noninteractive(
+            project_config,
+            global_config_path,
+            cache_root,
+            skills_dir,
+            repo=None,
+            names=names,
+            include_all=include_all,
+            url_resolver=url_resolver,
+            emit=emit,
+        )
+    if not names:
         raise click.exceptions.UsageError(
             "enable requires REPO and at least one NAME, or neither for interactive mode"
         )
@@ -803,11 +880,11 @@ def _enable_interactive(
     proj = _load_declarations_for_enable(project_config)
     locked = {s.name for s in proj.skills}
     cross_hint = _load_global_enabled_hint(project_config)
-    global_names, warnings = cross_hint
+    global_names, warnings = _load_global_enabled_hint(project_config)
     if warnings and emit is not None:
         for w in warnings:
             emit(f"Warning: {w['message']}")
-    global_set = global_names or frozenset()
+    global_set = set(global_names or {})
     skill_choices = sorted(
         [
             SkillChoice(
@@ -829,7 +906,7 @@ def _enable_interactive(
     for s in skills:
         path_by_name.setdefault(s.name, s.path)
 
-    resolved: list[tuple[str, str]] = []
+    resolved: list[tuple[str, str, str]] = []
     seen: set[str] = set()
     for name in selected_names:
         if name in locked or name in seen:
@@ -837,7 +914,7 @@ def _enable_interactive(
         if name not in path_by_name:
             continue
         seen.add(name)
-        resolved.append((name, path_by_name[name]))
+        resolved.append((name, selected_repo, path_by_name[name]))
 
     if not resolved:
         _emit(emit, "Nothing to enable.")
@@ -848,7 +925,6 @@ def _enable_interactive(
         global_config_path,
         cache_root,
         skills_dir,
-        repo=selected_repo,
         resolved=resolved,
         url_resolver=url_resolver,
         emit=emit,
@@ -863,24 +939,70 @@ def _enable_noninteractive(
     cache_root: Path,
     skills_dir: Path,
     *,
-    repo: str,
+    repo: str | None,
     names: list[str],
     include_all: bool,
     url_resolver: Callable[[str], str] | None,
     emit: Callable[[str], None] | None,
 ) -> EnableResult:
-    proj = _load_declarations_for_enable(project_config)
-    enabled = {s.name for s in proj.skills}
-    # Dedupe requested names, preserving first-seen order.
-    unique_names = list(dict.fromkeys(names))
-    needs_resolution = [n for n in unique_names if n not in enabled]
+    """Resolve and validate a batch of enable requests, then apply it.
 
-    # Resolve only the not-yet-enabled names against the cached Source. Atomic:
-    # collect every failure and abort the whole batch before any write.
-    resolved_paths: dict[str, str] = {}
+    ``repo`` is ``None`` in repo-less mode: every name is resolved against all
+    cached sources (never clones). Otherwise arguments resolve inside the one
+    repo — cloning a missing source first (never pulling, issue #46).
+
+    Path is the skill identity: an argument containing ``/`` matches a path
+    exactly; a pure name matches by FM name first and falls back to a root
+    single-segment path. Requests are validated against the current scope's
+    declarations: same repo+path as an existing declaration is an idempotent
+    already_enabled; the same name from a different source or path is an error
+    with a disable-first hint (fixing the silent no-op trap). The batch is
+    atomic: every failure is collected and nothing is written.
+    """
+    proj = _load_declarations_for_enable(project_config)
+    enabled_by_name = {s.name: s for s in proj.skills}
+    by_repo_path = {(s.repo, s.path): s for s in proj.skills}
+    unique_names = list(dict.fromkeys(names))
+    resolved: list[tuple[str, str, str]] = []
     failures: list[str] = []
     has_not_found = False
-    if needs_resolution:
+
+    if repo is None:
+        # Repo-less: scan every cached source once (no cloning).
+        scans: list[tuple[str, list[ScannedSkill]]] = [
+            (r, _scan_skills(cache_root / r, r, include_all=include_all))
+            for r in _list_cached_repos(cache_root)
+        ]
+        for name in unique_names:
+            existing = enabled_by_name.get(name)
+            matches = [(r, s.path) for r, scan in scans for s in scan if s.name == name]
+            if existing is not None and (not matches or (existing.repo, existing.path) in matches):
+                # Already satisfied by the existing declaration (stale cache,
+                # or the declaration is one of the candidates): idempotent.
+                resolved.append((name, existing.repo, existing.path))
+                continue
+            if not matches:
+                has_not_found = True
+                failures.append(
+                    f"skill {name!r} not found in any cached source; "
+                    "run 'skill-manager source available-skills' to list available skills"
+                )
+            elif len(matches) > 1:
+                candidates = ", ".join(f"{r}:{p}" for r, p in matches)
+                failures.append(
+                    f"skill {name!r} is ambiguous across sources; matching: {candidates}; "
+                    "use 'enable <repo> <name>' or 'enable <repo> <path>' to disambiguate"
+                )
+            else:
+                r, p = matches[0]
+                if existing is not None:
+                    failures.append(
+                        f"skill {name!r} is already enabled from {existing.repo}:{existing.path}; "
+                        f"disable it first: skill-manager disable {name}"
+                    )
+                else:
+                    resolved.append((name, r, p))
+    else:
         repo_dir = cache_root / repo
         if not repo_dir.is_dir():
             # enable may clone a missing source (never pull). Registration in
@@ -894,33 +1016,81 @@ def _enable_noninteractive(
             _emit(emit, f"cloned {repo} ({head[:8]})")
             repo_dir = cache_root / repo
         available = _scan_skills(repo_dir, repo, include_all=include_all)
-        for skill_name in needs_resolution:
-            matches = [s for s in available if s.name == skill_name]
+        by_name_scan: dict[str, list[ScannedSkill]] = {}
+        by_path_scan: dict[str, ScannedSkill] = {}
+        for skill in available:
+            by_name_scan.setdefault(skill.name, []).append(skill)
+            by_path_scan.setdefault(skill.path, skill)
+
+        for arg in unique_names:
+            if "/" in arg:
+                # Path identity: an existing declaration for (repo, path) is
+                # idempotent even when the cache went stale.
+                hit = by_repo_path.get((repo, arg))
+                if hit is not None:
+                    resolved.append((hit.name, repo, arg))
+                    continue
+                skill = by_path_scan.get(arg)
+                if skill is None:
+                    has_not_found = True
+                    failures.append(f"skill path {arg!r} not found in cached repo {repo!r}")
+                    continue
+                existing = enabled_by_name.get(skill.name)
+                if existing is not None:
+                    failures.append(
+                        f"skill {skill.name!r} is already enabled from "
+                        f"{existing.repo}:{existing.path}; disable it first: "
+                        f"skill-manager disable {skill.name}"
+                    )
+                    continue
+                resolved.append((skill.name, repo, arg))
+                continue
+            matches = by_name_scan.get(arg, [])
             if not matches:
+                path_skill = by_path_scan.get(arg)
+                if path_skill is not None:
+                    matches = [path_skill]
+            if not matches:
+                existing = enabled_by_name.get(arg)
+                if existing is not None and existing.repo == repo:
+                    # Stale cache: the declaration's repo matches the request;
+                    # keep the idempotent no-op (path unverifiable).
+                    resolved.append((arg, repo, existing.path))
+                    continue
                 has_not_found = True
-                failures.append(f"skill {skill_name!r} not found in cached repo {repo!r}")
-            elif len(matches) > 1:
+                failures.append(f"skill {arg!r} not found in cached repo {repo!r}")
+                continue
+            if len(matches) > 1:
                 paths_list = ", ".join(s.path for s in matches)
                 failures.append(
-                    f"skill {skill_name!r} is ambiguous in {repo!r}; matching paths: {paths_list}"
+                    f"skill {arg!r} is ambiguous in {repo!r}; matching paths: {paths_list}; "
+                    "use the path form: enable <repo> <path>"
                 )
-            else:
-                resolved_paths[skill_name] = matches[0].path
-        if failures:
-            msg = "; ".join(failures)
-            if has_not_found and not include_all:
-                msg += _ALL_HINT
-            raise NotFoundError(msg)
+                continue
+            skill = matches[0]
+            existing = enabled_by_name.get(skill.name)
+            if existing is not None:
+                if existing.repo == repo and existing.path == skill.path:
+                    resolved.append((existing.name, repo, skill.path))
+                else:
+                    failures.append(
+                        f"skill {skill.name!r} is already enabled from "
+                        f"{existing.repo}:{existing.path}; disable it first: "
+                        f"skill-manager disable {skill.name}"
+                    )
+                continue
+            resolved.append((skill.name, repo, skill.path))
 
-    # Rebuild request order; already-enabled names carry an empty path (the
-    # apply phase reads their existing declaration instead).
-    resolved = [(n, "" if n in enabled else resolved_paths[n]) for n in unique_names]
+    if failures:
+        msg = "; ".join(failures)
+        if has_not_found and not include_all:
+            msg += _ALL_HINT
+        raise NotFoundError(msg)
     return _enable_apply_batch(
         project_config,
         global_config_path,
         cache_root,
         skills_dir,
-        repo=repo,
         resolved=resolved,
         url_resolver=url_resolver,
         emit=emit,
@@ -933,42 +1103,93 @@ def _enable_apply_batch(
     cache_root: Path,
     skills_dir: Path,
     *,
-    repo: str,
-    resolved: list[tuple[str, str]],
+    resolved: list[tuple[str, str, str]],
     url_resolver: Callable[[str], str] | None,
     emit: Callable[[str], None] | None,
-    cross_hint: tuple[frozenset[str] | None, list[dict[str, str]]] | None = None,
+    cross_hint: tuple[dict[str, tuple[str, str]] | None, list[dict[str, str]]] | None = None,
     emit_hint_warnings: bool = True,
 ) -> EnableResult:
-    """Commit a validated, deduped batch of (name, path) skills.
+    """Commit a validated, deduped batch of ``(name, repo, path)`` skills.
 
-    Already-enabled names are idempotent successes (their path entry is
-    ignored); new names are appended. When at least one skill was added, the
-    target repo is ensured cloned (never pulled — only sync and source update
-    update cached content) and the new skills are linked.
+    Already-enabled names are idempotent successes only when the requested
+    (repo, path) matches the existing declaration; a same-name request from a
+    different source or path is an error with a disable-first hint. New names
+    are checked against the *other* scope — the global declaration for project
+    enable, the cwd project for ``--global`` enable: same-source overlaps get a
+    neutral hint, different sources are hard conflicts. When at least one skill
+    was added, each affected repo is ensured cloned (never pulled — only sync
+    and source update update cached content) and the new skills are linked.
 
     ``cross_hint`` is the optional preloaded ``_load_global_enabled_hint`` result
     so interactive enable can reuse one load for picker rows and apply.
     """
     proj = _load_declarations_for_enable(project_config)
     enabled = {s.name: s for s in proj.skills}
+    global_scope = _is_global_scope(project_config)
     if cross_hint is None:
-        global_names, warnings = _load_global_enabled_hint(project_config)
+        global_hint, warnings = _load_global_enabled_hint(project_config)
     else:
-        global_names, warnings = cross_hint
+        global_hint, warnings = cross_hint
+    # Conflict checks always look at the *other* scope; outcome hints keep the
+    # forward (global) semantics and are omitted in global scope.
+    project_hint = _load_project_hint(project_config)
+    other_scope = project_hint if global_scope else global_hint
     if emit_hint_warnings and warnings and emit is not None:
         for w in warnings:
             emit(f"Warning: {w['message']}")
+
+    # Validation pass — atomic: every failure aborts before any write.
+    failures: list[str] = []
+    for skill_name, skill_repo, skill_path in resolved:
+        existing = enabled.get(skill_name)
+        if existing is not None:
+            if existing.repo == skill_repo and existing.path == skill_path:
+                continue
+            failures.append(
+                f"skill {skill_name!r} is already enabled from {existing.repo}:{existing.path}; "
+                f"disable it first: skill-manager disable {skill_name}"
+            )
+            continue
+        g = other_scope.get(skill_name) if other_scope is not None else None
+        if g is not None and g[0] != skill_repo:
+            if global_scope:
+                failures.append(
+                    f"skill {skill_name!r} is already enabled in the project (cwd) from "
+                    f"{g[0]}:{g[1]}; enabling {skill_repo}:{skill_path} would create a "
+                    f"cross-scope name conflict; disable it first: "
+                    f"skill-manager disable {skill_name}"
+                )
+            else:
+                failures.append(
+                    f"skill {skill_name!r} is already enabled globally from {g[0]}:{g[1]}; "
+                    f"enabling {skill_repo}:{skill_path} would create a cross-scope name "
+                    f"conflict; disable it first: skill-manager --global disable {skill_name}"
+                )
+    if failures:
+        raise NotFoundError("; ".join(failures))
+
     outcomes: list[EnableOutcome] = []
-    added = 0
     added_refs: list[SkillRef] = []
-    for skill_name, skill_path in resolved:
-        hint = (skill_name in global_names) if global_names is not None else None
+    for skill_name, skill_repo, skill_path in resolved:
+        # Conflict checks use the other scope; the outcome hint keeps forward
+        # (global) semantics and is omitted in global scope.
+        g = other_scope.get(skill_name) if other_scope is not None else None
+        hint = (skill_name in global_hint) if global_hint is not None else None
         existing = enabled.get(skill_name)
         if existing is not None:
             _emit(emit, f"Skill {skill_name!r} already enabled")
             if hint:
-                _emit(emit, f"Skill {skill_name!r} also enabled globally")
+                if g[0] == existing.repo:
+                    _emit(
+                        emit,
+                        f"Skill {skill_name!r} also enabled globally (same source) — no conflict",
+                    )
+                else:
+                    _emit(
+                        emit,
+                        f"Warning: Skill {skill_name!r} conflicts with the other scope's "
+                        f"declaration ({g[0]}:{g[1]}) — different source",
+                    )
             outcomes.append(
                 EnableOutcome(
                     action="already_enabled",
@@ -977,38 +1198,48 @@ def _enable_apply_batch(
                 )
             )
             continue
-        skill_ref = SkillRef(name=skill_name, repo=repo, path=skill_path)
+        skill_ref = SkillRef(name=skill_name, repo=skill_repo, path=skill_path)
         proj.skills.append(skill_ref)
         added_refs.append(skill_ref)
-        _emit(emit, f"Added {skill_name} ({repo}:{skill_path}) to {project_config}")
+        _emit(emit, f"Added {skill_name} ({skill_repo}:{skill_path}) to {project_config}")
         if hint:
-            _emit(emit, f"Skill {skill_name!r} also enabled globally")
+            # Validation guarantees the overlap is same-source at this point.
+            _emit(
+                emit,
+                f"Skill {skill_name!r} also enabled globally (same source) — no conflict",
+            )
         outcomes.append(
             EnableOutcome(
                 action="enabled",
-                skill={"name": skill_name, "repo": repo, "path": skill_path},
+                skill={"name": skill_name, "repo": skill_repo, "path": skill_path},
                 enabled_globally=hint,
             )
         )
-        added += 1
 
     sync_result = None
-    if added:
+    if added_refs:
         config.save_skill_declarations(project_config, proj)
         global_cfg = config.load_global_config(global_config_path)
-        was_registered = repo in global_cfg.sources
         resolver = url_resolver or sources.repo_url
-        head = sources.clone_source(repo, global_cfg, cache_root, url=resolver(repo))
-        config.save_global_config(global_config_path, global_cfg)
-        sync_result = SyncResult(
-            sources=[
+        ensured_sources: list[SourceEnsured] = []
+        seen_repos: set[str] = set()
+        for skill_ref in added_refs:
+            if skill_ref.repo in seen_repos:
+                continue
+            seen_repos.add(skill_ref.repo)
+            was_registered = skill_ref.repo in global_cfg.sources
+            head = sources.clone_source(
+                skill_ref.repo, global_cfg, cache_root, url=resolver(skill_ref.repo)
+            )
+            ensured_sources.append(
                 SourceEnsured(
-                    repo=repo,
+                    repo=skill_ref.repo,
                     commit=head,
                     action="up_to_date" if was_registered else "cloned",
                 )
-            ]
-        )
+            )
+        config.save_global_config(global_config_path, global_cfg)
+        sync_result = SyncResult(sources=ensured_sources)
         for skill_ref in added_refs:
             link_result = links.ensure_link(skill_ref, cache_root, skills_dir)
             sync_result.links.append(LinkDone(name=skill_ref.name, action=link_result.action))
@@ -1191,6 +1422,8 @@ def list_(ctx: typer.Context) -> None:
                 }
                 if s.enabled_globally is not None:
                     row["enabled_globally"] = s.enabled_globally
+                if s.global_conflict:
+                    row["global_conflict"] = True
                 skills_payload.append(row)
             _success(ctx, {"skills": skills_payload}, warnings=result.warnings or None)
         else:
@@ -1200,18 +1433,24 @@ def list_(ctx: typer.Context) -> None:
             for repo, head, status in result.source_rows:
                 typer.echo(f"  {repo}  {head}  {status}")
             typer.echo("Skills:")
-            # Legend + name-column pad only when at least one row is also global.
-            show_global_legend = any(s.enabled_globally for s in result.skills)
+            # Legend + name-column pad only when a row carries a mark (⊕/⚠).
+            show_global_legend = any(
+                s.enabled_globally and not s.global_conflict for s in result.skills
+            )
+            has_marks = show_global_legend or any(s.global_conflict for s in result.skills)
             if show_global_legend:
-                typer.echo("  (⊕ = enabled globally)")
+                typer.echo("  (⊕ = also enabled globally, same source)")
             for s in result.skills:
                 # Human view keeps present/absent of source path (JSON omits it).
                 target_path = (paths.repos_cache_dir() / s.repo / s.path).resolve()
                 repo_present = target_path.is_dir()
-                # Project list: ⊕ before name when also global; pad peers for alignment.
-                if s.enabled_globally:
+                # ⚠ (cross-scope conflict) and ⊕ (benign same-source overlap)
+                # are mutually exclusive per row; pads keep columns aligned.
+                if s.global_conflict:
+                    name_cell = f"⚠ {s.name}"
+                elif s.enabled_globally:
                     name_cell = f"⊕ {s.name}"
-                elif show_global_legend:
+                elif has_marks:
                     name_cell = f"  {s.name}"
                 else:
                     name_cell = s.name

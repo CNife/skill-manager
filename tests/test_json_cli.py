@@ -193,12 +193,13 @@ def test_json_list_enabled_globally_by_name(
             {"name": "write", "repo": "tw93/Waza", "path": "skills/write"},
         ],
     )
-    # Global declaration shares the name "read" only (name-level match).
+    # Global declaration shares the name "read" from the same source
+    # (issue #47: same-source overlaps are benign ⊕, not conflicts).
     paths.global_skills_config_path().write_text(
         json.dumps(
             {
                 "skills": [
-                    {"name": "read", "repo": "other/Repo", "path": "skills/read"},
+                    {"name": "read", "repo": "tw93/Waza", "path": "skills/read"},
                 ]
             }
         ),
@@ -211,6 +212,7 @@ def test_json_list_enabled_globally_by_name(
     by_name = {s["name"]: s for s in body["data"]["skills"]}
     assert by_name["read"]["enabled_globally"] is True
     assert by_name["write"]["enabled_globally"] is False
+    assert "global_conflict" not in by_name["read"]
     assert "warnings" not in body
 
 
@@ -283,7 +285,7 @@ def test_list_human_keeps_sources_section(
 def test_list_human_marks_enabled_globally(
     tmp_path: Path, make_source_repo, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Project list prefixes ⊕ and prints a legend for global name overlaps."""
+    """Project list prefixes ⊕ and prints the same-source legend for overlaps."""
     from skill_manager import paths
 
     project, _head = _seed_cached_source(
@@ -298,8 +300,9 @@ def test_list_human_marks_enabled_globally(
             {"name": "write", "repo": "tw93/Waza", "path": "skills/write"},
         ],
     )
+    # Same-source overlap (issue #47): benign ⊕, not a conflict.
     paths.global_skills_config_path().write_text(
-        json.dumps({"skills": [{"name": "read", "repo": "other/Repo", "path": "skills/read"}]}),
+        json.dumps({"skills": [{"name": "read", "repo": "tw93/Waza", "path": "skills/read"}]}),
         encoding="utf-8",
     )
     monkeypatch.chdir(project)
@@ -307,7 +310,7 @@ def test_list_human_marks_enabled_globally(
     assert result.exit_code == 0, result.output
     out = result.stdout
     assert "Skills:" in out
-    assert "(⊕ = enabled globally)" in out
+    assert "(⊕ = also enabled globally, same source)" in out
     assert "⊕ read" in out
     # write is project-only: padded spaces, no mark; no global-only rows injected
     assert "⊕ write" not in out
@@ -321,8 +324,10 @@ def test_enable_human_mentions_also_enabled_globally(
 
     project, _head = _seed_cached_source(tmp_path, make_source_repo)
     _write_config(project, [])
+    # Same-source global overlap: legal, neutral hint (issue #47: a different
+    # source would be a hard conflict, covered in test_duplicate_names).
     paths.global_skills_config_path().write_text(
-        json.dumps({"skills": [{"name": "read", "repo": "other/Repo", "path": "skills/read"}]}),
+        json.dumps({"skills": [{"name": "read", "repo": "tw93/Waza", "path": "skills/read"}]}),
         encoding="utf-8",
     )
     monkeypatch.chdir(project)
@@ -726,7 +731,11 @@ def test_json_enable_one_arg_usage_error(tmp_path: Path, monkeypatch: pytest.Mon
 def test_json_enable_enabled_globally_true(
     tmp_path: Path, make_source_repo, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Project enable reports enabled_globally by name; orthogonal to action."""
+    """Project enable reports enabled_globally by name; orthogonal to action.
+
+    Same-source global overlap (issue #47: a different source would be a hard
+    cross-scope conflict, covered in test_duplicate_names).
+    """
     from skill_manager import paths
 
     project, _head = _seed_cached_source(
@@ -739,8 +748,8 @@ def test_json_enable_enabled_globally_true(
         json.dumps(
             {
                 "skills": [
-                    {"name": "read", "repo": "other/Repo", "path": "x/read"},
-                    {"name": "write", "repo": "other/Repo", "path": "x/write"},
+                    {"name": "read", "repo": "tw93/Waza", "path": "skills/read"},
+                    {"name": "write", "repo": "tw93/Waza", "path": "skills/write"},
                 ]
             }
         ),

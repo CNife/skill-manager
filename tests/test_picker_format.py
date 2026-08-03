@@ -107,6 +107,33 @@ def test_skill_enable_title_prefix() -> None:
     assert skill_enable_title("grilling", enabled_globally=True) == "⊕ grilling"
 
 
+def test_skill_enable_title_path_suffix() -> None:
+    """Issue #47: same-named rows are distinguishable via a `` (path)`` suffix."""
+    from skill_manager.picker import skill_enable_title
+
+    assert skill_enable_title("read", path="skills/read") == "read (skills/read)"
+    assert (
+        skill_enable_title("read", enabled_globally=True, path="skills/read")
+        == "⊕ read (skills/read)"
+    )
+
+
+def test_skill_enable_title_for_duplicate_names() -> None:
+    """Rows whose name appears more than once carry the path; unique rows do not."""
+    from skill_manager.picker import SkillChoice, skill_enable_title_for
+
+    unique = SkillChoice(name="read", path="skills/read", description="")
+    assert skill_enable_title_for(unique, name_count=1) == "read"
+
+    duplicate = SkillChoice(name="read", path="plugins/waza/skills/read", description="")
+    assert skill_enable_title_for(duplicate, name_count=2) == "read (plugins/waza/skills/read)"
+
+    duplicate_global = SkillChoice(
+        name="read", path="a/read", description="", enabled_globally=True
+    )
+    assert skill_enable_title_for(duplicate_global, name_count=2) == "⊕ read (a/read)"
+
+
 def test_locked_row_tokens_use_green_check_and_optional_global() -> None:
     """Locked rows render ✓ (proj-locked) then title; title may carry ⊕."""
     from questionary import Choice
