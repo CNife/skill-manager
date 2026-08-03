@@ -9,6 +9,7 @@ rewritten; other flags (``--all`` etc.) are left in place.
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -30,6 +31,16 @@ def _write_decls(path: Path, skills: list[dict]) -> None:
 def _parse_json(result) -> dict:
     assert result.stdout.strip(), f"empty stdout; stderr={result.stderr!r} output={result.output!r}"
     return json.loads(result.stdout)
+
+
+def _strip_ansi(text: str) -> str:
+    """Drop SGR color codes before substring assertions.
+
+    On a TTY (and under GitHub Actions, where typer forces terminal output)
+    error text is colorized: rich may split a highlighted token like
+    ``--global`` with ANSI sequences, so the raw bytes are not contiguous.
+    """
+    return re.sub(r"\x1b\[[0-9;]*m", "", text)
 
 
 def _seed_source(tmp_path: Path, make_source_repo, skills: dict[str, str] | None = None) -> str:
@@ -156,7 +167,7 @@ def test_global_token_after_double_dash_not_hoisted(
 
     result = runner.invoke(app, ["sync", "--", "--global"])
     assert result.exit_code == 2
-    assert "--global" in result.output
+    assert "--global" in _strip_ansi(result.output)
     assert not (paths.global_skills_dir() / "read").exists()
 
 
@@ -168,7 +179,7 @@ def test_json_token_after_double_dash_not_hoisted(
 
     result = runner.invoke(app, ["sync", "--", "--json"])
     assert result.exit_code == 2
-    assert "--json" in result.output
+    assert "--json" in _strip_ansi(result.output)
     assert not result.stdout.lstrip().startswith("{")
 
 
