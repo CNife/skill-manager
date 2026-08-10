@@ -147,6 +147,40 @@ class AvailableSkillsResult:
         return {"skills": self.skills}
 
 
+@dataclass(frozen=True)
+class DoctorProblem:
+    code: str
+    scope: str  # project | global | config | cache | cross-scope
+    message: str
+    fix: str
+    name: str | None = None
+    repo: str | None = None
+    path: str | None = None
+
+    def to_data(self) -> dict[str, Any]:
+        data: dict[str, Any] = {
+            "code": self.code,
+            "scope": self.scope,
+            "message": self.message,
+            "fix": self.fix,
+        }
+        if self.name is not None:
+            data["name"] = self.name
+        if self.repo is not None:
+            data["repo"] = self.repo
+        if self.path is not None:
+            data["path"] = self.path
+        return data
+
+
+@dataclass
+class DoctorResult:
+    problems: list[DoctorProblem]
+
+    def to_data(self) -> dict[str, Any]:
+        return {"problems": [p.to_data() for p in self.problems]}
+
+
 # ── errors raised inside run_* for command-layer mapping ──────────────────────
 
 
@@ -699,6 +733,334 @@ def _list_cached_repos(cache_root: Path) -> list[str]:
             if repo_dir.is_dir():
                 repos.append(f"{owner_dir.name}/{repo_dir.name}")
     return repos
+
+
+def run_doctor(
+    project_config: Path,
+    global_skills_config: Path,
+    global_config_path: Path,
+    cache_root: Path,
+    project_skills_dir: Path,
+    global_skills_dir: Path,
+) -> DoctorResult:
+    """Diagnose consistency issues across both scopes and infrastructure.
+
+    Read-only and offline: checks declarations, global config, source cache,
+    and links in both project and global scopes. Parse failures are recorded
+    as problems and the remaining checks continue. Never raises ConfigError.
+    """
+    problems: list[DoctorProblem] = []
+    same_scope = project_config.resolve() == global_skills_config.resolve()
+
+    # ── Load declarations (non-blocking: parse errors become problems) ──
+    project_decls: config.SkillDeclarations | None = None
+    try:
+        project_decls = _load_declarations_for_list_sync(project_config)
+    except ConfigError as exc:
+        problems.append(
+            DoctorProblem(
+                code="declaration_parse_error",
+                scope="project",
+                message=str(exc),
+                fix="Fix the declaration file",
+            )
+        )
+
+    global_decls: config.SkillDeclarations | None = None
+    if not same_scope:
+        try:
+            global_decls = _load_declarations_for_list_sync(global_skills_config)
+        except ConfigError as exc:
+            problems.append(
+                DoctorProblem(
+                    code="declaration_parse_error",
+                    scope="global",
+                    message=str(exc),
+                    fix="Fix the declaration file",
+                )
+            )
+
+    # ── Load global config (non-blocking) ──
+    global_cfg: config.GlobalConfig | None = None
+    try:
+        global_cfg = config.load_global_config(global_config_path)
+    except ConfigError as exc:
+        problems.append(
+            DoctorProblem(
+                code="global_config_parse_error",
+                scope="config",
+                message=str(exc),
+                fix="Fix the global config, or delete it and run sync to rebuild",
+            )
+        )
+
+    # ── XDG environment checks ──
+    for var, scope in (("XDG_CONFIG_HOME", "config"), ("XDG_CACHE_HOME", "cache")):
+        value = os.environ.get(var, "")
+        if value and not Path(value).is_absolute():
+            problems.append(
+                DoctorProblem(
+                    code="xdg_path_issue",
+                    scope=scope,
+                    message=(
+                        f"{var} is set to a relative path {value!r} (must be absolute per XDG spec)"
+                    ),
+                    fix="Check environment variables",
+                )
+            )
+
+    # ── Cache directory writable check ──
+    writable_dir = cache_root if cache_root.exists() else cache_root.parent
+    if writable_dir.exists() and not os.access(writable_dir, os.W_OK):
+        problems.append(
+            DoctorProblem(
+                code="cache_dir_not_writable",
+                scope="cache",
+                message=f"source cache directory is not writable: {writable_dir}",
+                fix="Fix directory permissions",
+            )
+        )
+
+    # ── Source three-way consistency (declarations ↔ global config ↔ cache) ──
+    declared_repos: set[str] = set()
+    if project_decls is not None:
+        declared_repos.update(s.repo for s in project_decls.skills)
+    if global_decls is not None:
+        declared_repos.update(s.repo for s in global_decls.skills)
+
+    cached_repos = set(_list_cached_repos(cache_root))
+    registered_repos: set[str] = set(global_cfg.sources) if global_cfg is not None else set()
+
+    # declared_source_not_registered
+    for scope_label, decls in (
+        ("project", project_decls),
+        ("global", global_decls),
+    ):
+        if decls is None:
+            continue
+        sync_cmd = (
+            "skill-manager --global sync" if scope_label == "global" else "skill-manager sync"
+        )
+        for skill in decls.skills:
+            if skill.repo not in registered_repos:
+                problems.append(
+                    DoctorProblem(
+                        code="declared_source_not_registered",
+                        scope=scope_label,
+                        message=(
+                            f"skill {skill.name!r} references source {skill.repo!r}"
+                            " not registered in global config"
+                        ),
+                        fix=sync_cmd,
+                        name=skill.name,
+                        repo=skill.repo,
+                    )
+                )
+
+    # registered_source_cache_missing
+    for repo in sorted(registered_repos):
+        if repo not in cached_repos:
+            problems.append(
+                DoctorProblem(
+                    code="registered_source_cache_missing",
+                    scope="cache",
+                    message=f"source {repo!r} is registered but not cached",
+                    fix=f"skill-manager source remove {repo} then source add",
+                    repo=repo,
+                )
+            )
+
+    # orphan_source_registered (registered + cached but no declaration references)
+    for repo in sorted(registered_repos & cached_repos):
+        if repo not in declared_repos:
+            problems.append(
+                DoctorProblem(
+                    code="orphan_source_registered",
+                    scope="config",
+                    message=(
+                        f"source {repo!r} is registered and cached but no declaration references it"
+                    ),
+                    fix=f"skill-manager source remove {repo}",
+                    repo=repo,
+                )
+            )
+
+    # orphan_source_cache (cached but not registered)
+    for repo in sorted(cached_repos):
+        if repo not in registered_repos:
+            problems.append(
+                DoctorProblem(
+                    code="orphan_source_cache",
+                    scope="cache",
+                    message=f"source {repo!r} is cached but not registered in global config",
+                    fix=(
+                        f"Remove the cache directory manually, or skill-manager source add {repo}"
+                    ),
+                    repo=repo,
+                )
+            )
+
+    # head_drift
+    for repo in sorted(registered_repos & cached_repos):
+        recorded = global_cfg.sources[repo].commit
+        actual = sources.current_head(cache_root, repo)
+        if actual is not None and actual != recorded:
+            problems.append(
+                DoctorProblem(
+                    code="head_drift",
+                    scope="cache",
+                    message=(
+                        f"source {repo!r} HEAD drift:"
+                        f" global config records {recorded[:8]},"
+                        f" cache has {actual[:8]}"
+                    ),
+                    fix=f"skill-manager source update {repo}",
+                    repo=repo,
+                )
+            )
+
+    # ── Per-scope link and path checks ──
+    scope_entries: list[tuple[str, config.SkillDeclarations, Path]] = []
+    if project_decls is not None:
+        scope_entries.append(("project", project_decls, project_skills_dir))
+    if global_decls is not None and not same_scope:
+        scope_entries.append(("global", global_decls, global_skills_dir))
+
+    for scope_label, decls, skills_dir in scope_entries:
+        sync_cmd = (
+            "skill-manager --global sync" if scope_label == "global" else "skill-manager sync"
+        )
+        declared_names: set[str] = set()
+
+        for skill in decls.skills:
+            declared_names.add(skill.name)
+            status = _link_status(skill, cache_root, skills_dir)
+            if status == "unlinked":
+                problems.append(
+                    DoctorProblem(
+                        code="unlinked",
+                        scope=scope_label,
+                        message=f"skill {skill.name!r} is declared but not linked",
+                        fix=sync_cmd,
+                        name=skill.name,
+                        repo=skill.repo,
+                        path=skill.path,
+                    )
+                )
+            elif status == "broken":
+                problems.append(
+                    DoctorProblem(
+                        code="broken_link",
+                        scope=scope_label,
+                        message=f"link for skill {skill.name!r} is broken (target missing)",
+                        fix=sync_cmd,
+                        name=skill.name,
+                        repo=skill.repo,
+                        path=skill.path,
+                    )
+                )
+            elif status == "external":
+                problems.append(
+                    DoctorProblem(
+                        code="external_link",
+                        scope=scope_label,
+                        message=(
+                            f"link for skill {skill.name!r}"
+                            " points to a different target than declared"
+                        ),
+                        fix=f"Remove the link manually, then {sync_cmd}",
+                        name=skill.name,
+                        repo=skill.repo,
+                        path=skill.path,
+                    )
+                )
+
+            # declared_path_invalid (only when repo is cached)
+            if (cache_root / skill.repo).is_dir():
+                target = cache_root / skill.repo / skill.path
+                if not target.is_dir() or not (target / "SKILL.md").is_file():
+                    problems.append(
+                        DoctorProblem(
+                            code="declared_path_invalid",
+                            scope=scope_label,
+                            message=(
+                                f"skill {skill.name!r} path {skill.path!r}"
+                                f" not found or missing SKILL.md in {skill.repo}"
+                            ),
+                            fix="Fix the path, or skill-manager source update",
+                            name=skill.name,
+                            repo=skill.repo,
+                            path=skill.path,
+                        )
+                    )
+
+        # orphan_link (symlinks in skills_dir not in declarations)
+        if skills_dir.is_dir():
+            for entry in sorted(skills_dir.iterdir()):
+                if entry.is_symlink() and entry.name not in declared_names:
+                    problems.append(
+                        DoctorProblem(
+                            code="orphan_link",
+                            scope=scope_label,
+                            message=(
+                                f"link {entry.name!r} exists in {scope_label} skills dir"
+                                " but no declaration references it"
+                            ),
+                            fix="Remove the link manually, or add a declaration with enable",
+                            name=entry.name,
+                        )
+                    )
+
+    # ── Cross-scope conflict ──
+    if project_decls is not None and global_decls is not None:
+        proj_map: dict[str, tuple[str, str]] = {}
+        for s in project_decls.skills:
+            proj_map.setdefault(s.name, (s.repo, s.path))
+        for s in global_decls.skills:
+            if s.name in proj_map:
+                p_repo, p_path = proj_map[s.name]
+                if p_repo != s.repo or p_path != s.path:
+                    problems.append(
+                        DoctorProblem(
+                            code="cross_scope_conflict",
+                            scope="cross-scope",
+                            message=(
+                                f"skill {s.name!r} declared in both scopes"
+                                " with different sources:"
+                                f" project={p_repo}:{p_path},"
+                                f" global={s.repo}:{s.path}"
+                            ),
+                            fix=(
+                                f"skill-manager disable {s.name} on one side, or align the source"
+                            ),
+                            name=s.name,
+                        )
+                    )
+
+    # ── Cache git state ──
+    for repo in sorted(cached_repos):
+        if sources.detached_head(cache_root, repo):
+            problems.append(
+                DoctorProblem(
+                    code="cache_detached_head",
+                    scope="cache",
+                    message=f"source {repo!r} is in detached HEAD state",
+                    fix="git checkout <branch> or skill-manager source update",
+                    repo=repo,
+                )
+            )
+        if sources.is_dirty(cache_root, repo):
+            problems.append(
+                DoctorProblem(
+                    code="cache_dirty",
+                    scope="cache",
+                    message=f"source {repo!r} has uncommitted changes",
+                    fix="git stash or skill-manager source update",
+                    repo=repo,
+                )
+            )
+
+    return DoctorResult(problems=problems)
 
 
 # Directories skipped during default Source skill discovery (noise trees).
@@ -1620,6 +1982,68 @@ def list_(ctx: typer.Context) -> None:
                     f"  {name_cell}  {s.repo}:{s.path}  "
                     f"{_color(s.link, _STATUS_COLORS.get(s.link))}"
                 )
+    except (ConfigError, SourceError, LinkError, NotFoundError, UsageError) as e:
+        _handle_command_error(ctx, e)
+
+
+# ── doctor command ───────────────────────────────────────────────────────────
+
+
+_DOCTOR_CATEGORIES: list[tuple[str, frozenset[str]]] = [
+    ("Config", frozenset({"declaration_parse_error", "global_config_parse_error"})),
+    (
+        "Source",
+        frozenset(
+            {
+                "declared_source_not_registered",
+                "registered_source_cache_missing",
+                "orphan_source_registered",
+                "orphan_source_cache",
+                "head_drift",
+                "declared_path_invalid",
+            }
+        ),
+    ),
+    ("Link", frozenset({"unlinked", "broken_link", "external_link", "orphan_link"})),
+    ("Conflict", frozenset({"cross_scope_conflict"})),
+    ("Cache", frozenset({"cache_detached_head", "cache_dirty"})),
+    ("Environment", frozenset({"xdg_path_issue", "cache_dir_not_writable"})),
+]
+
+
+def _render_doctor_text(result: DoctorResult) -> None:
+    """Render doctor problems grouped by category for human output."""
+    if not result.problems:
+        typer.echo("No problems found.")
+        return
+    for category, codes in _DOCTOR_CATEGORIES:
+        cat_problems = [p for p in result.problems if p.code in codes]
+        if not cat_problems:
+            continue
+        typer.echo(f"{category}:")
+        for p in cat_problems:
+            typer.echo(f"  {p.code}: {p.message}")
+            typer.echo(f"    -> fix: {p.fix}")
+
+
+@app.command()
+def doctor(ctx: typer.Context) -> None:
+    """Diagnose consistency issues across all scopes and infrastructure."""
+    try:
+        if ctx.obj and ctx.obj.get("global"):
+            raise UsageError("doctor is a panoramic command and does not accept --global")
+        result = run_doctor(
+            paths.project_config_path(),
+            paths.global_skills_config_path(),
+            paths.config_file(),
+            paths.repos_cache_dir(),
+            paths.project_skills_dir(),
+            paths.global_skills_dir(),
+        )
+        if _is_json(ctx):
+            _success(ctx, result.to_data())
+        else:
+            _render_doctor_text(result)
     except (ConfigError, SourceError, LinkError, NotFoundError, UsageError) as e:
         _handle_command_error(ctx, e)
 
