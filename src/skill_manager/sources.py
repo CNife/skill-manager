@@ -104,3 +104,44 @@ def remove_source(
         shutil.rmtree(dest)
     del global_config.sources[repo]
     return had_cache
+
+
+def _git_readonly(args: list[str], cache_root: Path, repo: str) -> str | None:
+    """Run a read-only git command in a cached repo; return stdout or None.
+
+    Never raises: doctor degrades gracefully when a cache directory is not a
+    valid git repo (e.g. manually created placeholder).
+    """
+    dest = cache_root / repo
+    if not dest.is_dir():
+        return None
+    result = subprocess.run(["git", *args], cwd=dest, capture_output=True, text=True, check=False)
+    if result.returncode != 0:
+        return None
+    return result.stdout.strip()
+
+
+def current_head(cache_root: Path, repo: str) -> str | None:
+    """Return the current HEAD commit of a cached repo, or None if git fails."""
+    return _git_readonly(["rev-parse", "HEAD"], cache_root, repo)
+
+
+def detached_head(cache_root: Path, repo: str) -> bool | None:
+    """True if the cached repo is in detached HEAD state.
+
+    Returns None when the cache is missing or git fails (doctor skips the
+    check in that case).
+    """
+    out = _git_readonly(["rev-parse", "--abbrev-ref", "HEAD"], cache_root, repo)
+    return None if out is None else out == "HEAD"
+
+
+def is_dirty(cache_root: Path, repo: str) -> bool | None:
+    """True if the cached repo has uncommitted changes to tracked files.
+
+    Returns None when the cache is missing or git fails. Untracked files are
+    excluded (``--untracked-files=no``) per the doctor spec: they are noise
+    and do not affect ``source update``.
+    """
+    out = _git_readonly(["status", "--porcelain", "--untracked-files=no"], cache_root, repo)
+    return None if out is None else bool(out)
