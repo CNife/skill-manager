@@ -33,8 +33,12 @@ _Avoid_: global config, user manifest
 _Avoid_: mode, level
 
 **Source cache / 源缓存**:
-XDG 缓存目录（默认 `~/.cache/skill-manager/repos/`），存放已克隆的 Source。
+XDG 缓存目录（默认 `~/.cache/skill-manager/repos/`），存放已克隆的 Source。缓存是 Source 的**稀疏切片**（git 原生 sparse-checkout + blobless partial clone），工作树只落物化集合，不是整树镜像。
 _Avoid_: library, global library, 全局技能库
+
+**Materialization set / 物化集合**:
+Source 树中必须落到缓存工作树的目录集合：树里所有含 `SKILL.md` 的目录，**不做隐藏/噪声过滤**（发现侧在 `--all` 下可能看见它们）。嵌套 skill 只留最外层，与扫描器的 skill-root 截断一致。根级 `SKILL.md`（整仓 skill）例外：该 Source 物化整棵树，因为这类 skill 的资产可能在任何子目录。
+_Avoid_: sparse set, checkout set, 检出集合
 
 **Link / 链接**:
 `./.agents/skills/<name>`（项目）或 `~/.agents/skills/<name>`（全局）下的符号链接，指向源缓存内某个 Skill 目录。
@@ -76,3 +80,10 @@ resolution hint in both directions (project and `--global`).
 cached content. `enable <repo> <name>` and `source add` may clone a missing
 Source into the cache and register it in the Global config, but they never pull
 — an existing cached clone is left untouched.
+
+**Cache shape**: a cached Source is a *sparse slice* of its repo (blobless
+partial clone, full history, worktree limited to the Materialization set).
+Materialization is part of cached content, so the `clone_source` /
+`pull_source` seam is its only writer — a pre-existing full clone is slimmed in
+place by the next `sync` / `source update`, with no migration command. The full
+tree comes back with git's own `sparse-checkout disable`.
