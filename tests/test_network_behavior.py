@@ -15,7 +15,7 @@ from helpers import skill_md
 from typer.testing import CliRunner
 
 from skill_manager import paths
-from skill_manager.cli import app, run_enable
+from skill_manager.cli import app, run_enable, run_sync
 from skill_manager.config import GlobalConfig, load_skill_declarations, save_global_config
 from skill_manager.sources import clone_source
 
@@ -28,7 +28,19 @@ def _write_config(project: Path, skills: list[dict]) -> None:
 
 def _parse_json(result) -> dict:
     assert result.stdout.strip(), f"empty stdout; stderr={result.stderr!r} output={result.output!r}"
+    assert result.stderr == ""
     return json.loads(result.stdout)
+
+
+class _RecordingProgress:
+    def __init__(self) -> None:
+        self.events: list[tuple[str, str]] = []
+
+    def start(self, text: str) -> None:
+        self.events.append(("start", text))
+
+    def done(self, text: str) -> None:
+        self.events.append(("done", text))
 
 
 def _seed_cached(
@@ -113,7 +125,10 @@ def test_sync_offline_raises(
 
     result = runner.invoke(app, ["sync"])
     assert result.exit_code == 1
-    assert "failed" in result.output
+    body = _parse_json(result)
+    assert body["ok"] is False
+    assert body["error"]["code"] == "source_error"
+    assert "failed" in body["error"]["message"]
 
 
 # ── enable clones missing sources, never pulls ───────────────────────────────
@@ -162,7 +177,8 @@ def test_enable_uncached_repo_visible_in_source_list(
     assert result.exit_code == 0, result.output
     listed = runner.invoke(app, ["source", "list"])
     assert listed.exit_code == 0, listed.output
-    assert "tw93/Waza" in listed.output
+    listed_body = _parse_json(listed)
+    assert [source["repo"] for source in listed_body["data"]["sources"]] == ["tw93/Waza"]
 
 
 def test_enable_does_not_pull_cached_repo(
@@ -176,7 +192,7 @@ def test_enable_does_not_pull_cached_repo(
     _write_config(project, [])
     monkeypatch.chdir(project)
 
-    emit_lines: list[str] = []
+    progress = _RecordingProgress()
     result = run_enable(
         project / ".skill-manager.json",
         paths.config_file(),
@@ -184,11 +200,11 @@ def test_enable_does_not_pull_cached_repo(
         project / ".agents" / "skills",
         repo="tw93/Waza",
         names=["read"],
-        emit=emit_lines.append,
+        progress=progress,
     )
     assert result.outcomes[0].action == "enabled"
     assert _cached_head("tw93/Waza") == head
-    assert not any("pulling" in ln or "pulled" in ln for ln in emit_lines)
+    assert not any("pulling" in text or "pulled" in text for _kind, text in progress.events)
 
 
 def test_enable_does_not_update_other_declared_source(
@@ -226,7 +242,7 @@ def test_enable_does_not_update_other_declared_source(
 def test_source_update_noop_reports_up_to_date(
     tmp_path: Path, make_source_repo, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """An empty pull reports up-to-date (text and JSON)."""
+    """An empty pull reports the up_to_date action and current commit."""
     _upstream, _cache_repo, head = _seed_cached(tmp_path, make_source_repo)
     project = tmp_path / "proj"
     project.mkdir()
@@ -234,9 +250,7 @@ def test_source_update_noop_reports_up_to_date(
 
     result = runner.invoke(app, ["source", "update"])
     assert result.exit_code == 0, result.output
-    assert f"up-to-date tw93/Waza ({head[:8]})" in result.output
-
-    body = _parse_json(runner.invoke(app, ["--json", "source", "update"]))
+    body = _parse_json(result)
     assert body["data"]["updates"] == [
         {"action": "up_to_date", "repo": "tw93/Waza", "commit": head}
     ]
@@ -245,14 +259,14 @@ def test_source_update_noop_reports_up_to_date(
 def test_source_update_pulled_reports_old_new(
     tmp_path: Path, make_source_repo, monkeypatch: pytest.MonkeyPatch, git
 ) -> None:
-    """A real pull reports old → new (text and JSON with old_commit/new_commit)."""
+    """A real pull reports old and new commit fields in the JSON result."""
     upstream, _cache_repo, old = _seed_cached(tmp_path, make_source_repo)
     project = tmp_path / "proj"
     project.mkdir()
     monkeypatch.chdir(project)
 
     new = _advance_upstream(upstream, git)
-    body = _parse_json(runner.invoke(app, ["--json", "source", "update"]))
+    body = _parse_json(runner.invoke(app, ["source", "update"]))
     assert body["data"]["updates"] == [
         {
             "action": "updated",
@@ -264,34 +278,77 @@ def test_source_update_pulled_reports_old_new(
     ]
 
     new2 = _advance_upstream(upstream, git, marker="advance2")
-    result = runner.invoke(app, ["source", "update"])
-    assert result.exit_code == 0, result.output
-    assert f"updated tw93/Waza ({new[:8]} → {new2[:8]})" in result.output
+    second_update = runner.invoke(app, ["source", "update"])
+    assert second_update.exit_code == 0, second_update.output
+    assert _parse_json(second_update)["data"]["updates"] == [
+        {
+            "action": "updated",
+            "repo": "tw93/Waza",
+            "commit": new2,
+            "old_commit": new,
+            "new_commit": new2,
+        }
+    ]
 
 
-# ── sync: start + result lines per pull, JSON carries the same distinction ────
+# ── sync: progress events + JSON result actions ──────────────────────────────
 
 
-def test_sync_pull_start_and_result_lines(
+def test_run_sync_progress_sink_reports_actions(
     tmp_path: Path, make_source_repo, monkeypatch: pytest.MonkeyPatch, git
 ) -> None:
-    """sync prints a pulling start line before each pull and a result line after."""
+    """run_sync pairs progress events in order and returns each operation action."""
     upstream, _cache_repo, head = _seed_cached(tmp_path, make_source_repo)
     project = tmp_path / "proj"
     project.mkdir()
     _write_config(project, [{"name": "read", "repo": "tw93/Waza", "path": "skills/read"}])
     monkeypatch.chdir(project)
 
-    result = runner.invoke(app, ["sync"])
-    assert result.exit_code == 0, result.output
-    assert "pulling tw93/Waza..." in result.output
-    assert f"up-to-date tw93/Waza ({head[:8]})" in result.output
+    first_progress = _RecordingProgress()
+    first = run_sync(
+        project / ".skill-manager.json",
+        paths.config_file(),
+        paths.repos_cache_dir(),
+        project / ".agents" / "skills",
+        progress=first_progress,
+    )
+    assert [kind for kind, _text in first_progress.events] == [
+        "start",
+        "done",
+        "start",
+        "done",
+    ]
+    assert first_progress.events[0] == ("start", "pulling tw93/Waza...")
+    assert first_progress.events[1] == ("done", f"up-to-date tw93/Waza ({head[:8]})")
+    assert first_progress.events[2] == ("start", "linking read...")
+    assert first_progress.events[3][1].startswith("created read -> ")
+    assert [source.action for source in first.sources] == ["up_to_date"]
+    assert [link.action for link in first.links] == ["created"]
 
     new = _advance_upstream(upstream, git)
-    result = runner.invoke(app, ["sync"])
-    assert result.exit_code == 0, result.output
-    assert "pulling tw93/Waza..." in result.output
-    assert f"pulled tw93/Waza ({head[:8]} → {new[:8]})" in result.output
+    updated_progress = _RecordingProgress()
+    updated = run_sync(
+        project / ".skill-manager.json",
+        paths.config_file(),
+        paths.repos_cache_dir(),
+        project / ".agents" / "skills",
+        progress=updated_progress,
+    )
+    assert [kind for kind, _text in updated_progress.events] == [
+        "start",
+        "done",
+        "start",
+        "done",
+    ]
+    assert updated_progress.events[0] == ("start", "pulling tw93/Waza...")
+    assert updated_progress.events[1] == (
+        "done",
+        f"pulled tw93/Waza ({head[:8]} → {new[:8]})",
+    )
+    assert updated_progress.events[2] == ("start", "linking read...")
+    assert updated_progress.events[3][1].startswith("exists read -> ")
+    assert [source.action for source in updated.sources] == ["updated"]
+    assert [link.action for link in updated.links] == ["exists"]
 
 
 def test_sync_json_reports_action_and_commits(
@@ -304,13 +361,13 @@ def test_sync_json_reports_action_and_commits(
     _write_config(project, [{"name": "read", "repo": "tw93/Waza", "path": "skills/read"}])
     monkeypatch.chdir(project)
 
-    body = _parse_json(runner.invoke(app, ["--json", "sync"]))
+    body = _parse_json(runner.invoke(app, ["sync"]))
     assert body["data"]["sources"] == [
         {"repo": "tw93/Waza", "commit": head, "action": "up_to_date"}
     ]
 
     new = _advance_upstream(upstream, git)
-    body = _parse_json(runner.invoke(app, ["--json", "sync"]))
+    body = _parse_json(runner.invoke(app, ["sync"]))
     assert body["data"]["sources"] == [
         {
             "repo": "tw93/Waza",

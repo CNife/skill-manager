@@ -83,7 +83,7 @@ def _skill_keys(skills: list[dict]) -> set[tuple[str, str]]:
 
 def test_json_available_skills_default_filters_noise(tmp_path: Path, make_source_repo) -> None:
     _seed_cached_source(tmp_path, make_source_repo, FILTERED_LAYOUT)
-    result = runner.invoke(app, ["--json", "source", "available-skills"])
+    result = runner.invoke(app, ["source", "available-skills"])
     assert result.exit_code == 0, result.output
     body = _parse_json(result)
     assert body["ok"] is True
@@ -101,7 +101,7 @@ def test_json_available_skills_default_filters_noise(tmp_path: Path, make_source
 
 def test_json_available_skills_all_includes_filtered(tmp_path: Path, make_source_repo) -> None:
     _seed_cached_source(tmp_path, make_source_repo, FILTERED_LAYOUT)
-    result = runner.invoke(app, ["--json", "source", "available-skills", "--all"])
+    result = runner.invoke(app, ["source", "available-skills", "--all"])
     assert result.exit_code == 0, result.output
     body = _parse_json(result)
     keys = _skill_keys(body["data"]["skills"])
@@ -125,8 +125,8 @@ def test_available_skills_skill_root_truncation_default_and_all(
     }
     _seed_cached_source(tmp_path, make_source_repo, layout)
     for args in (
-        ["--json", "source", "available-skills"],
-        ["--json", "source", "available-skills", "--all"],
+        ["source", "available-skills"],
+        ["source", "available-skills", "--all"],
     ):
         result = runner.invoke(app, args)
         assert result.exit_code == 0, result.output
@@ -136,7 +136,7 @@ def test_available_skills_skill_root_truncation_default_and_all(
 
 def test_json_available_skills_root_skill_layout(tmp_path: Path, make_source_repo) -> None:
     _seed_cached_source(tmp_path, make_source_repo, {".": ROOT_SKILL})
-    result = runner.invoke(app, ["--json", "source", "available-skills", "tw93/Waza"])
+    result = runner.invoke(app, ["source", "available-skills", "tw93/Waza"])
     assert result.exit_code == 0, result.output
     body = _parse_json(result)
     assert body["data"]["skills"] == [{"name": "root-skill", "repo": "tw93/Waza", "path": "."}]
@@ -149,11 +149,11 @@ def test_json_available_skills_default_empty_all_nonempty(tmp_path: Path, make_s
         make_source_repo,
         {".archive/old": ARCHIVED, "skills/secret": INTERNAL},
     )
-    default = runner.invoke(app, ["--json", "source", "available-skills"])
+    default = runner.invoke(app, ["source", "available-skills"])
     assert default.exit_code == 0, default.output
     assert _parse_json(default)["data"]["skills"] == []
 
-    full = runner.invoke(app, ["--json", "source", "available-skills", "--all"])
+    full = runner.invoke(app, ["source", "available-skills", "--all"])
     assert full.exit_code == 0, full.output
     keys = _skill_keys(_parse_json(full)["data"]["skills"])
     assert ("old", ".archive/old") in keys
@@ -161,7 +161,7 @@ def test_json_available_skills_default_empty_all_nonempty(tmp_path: Path, make_s
 
 
 def test_json_available_skills_not_cached_unchanged(tmp_path: Path) -> None:
-    result = runner.invoke(app, ["--json", "source", "available-skills", "no/such"])
+    result = runner.invoke(app, ["source", "available-skills", "no/such"])
     assert result.exit_code == 1
     body = _parse_json(result)
     assert body["error"]["code"] == "not_found"
@@ -186,7 +186,7 @@ def test_json_available_skills_internal_non_bool_still_listed(
             "skills/nodesc": MISSING_DESC,
         },
     )
-    result = runner.invoke(app, ["--json", "source", "available-skills"])
+    result = runner.invoke(app, ["source", "available-skills"])
     assert result.exit_code == 0, result.output
     keys = _skill_keys(_parse_json(result)["data"]["skills"])
     # Non-bool internal still qualifies when name+description present.
@@ -205,42 +205,18 @@ def test_evil_name_skill_never_qualifies(tmp_path: Path, make_source_repo, monke
     monkeypatch.chdir(project)
     # Never listed, with or without --all (shape check is unconditional).
     for args in (
-        ["--json", "source", "available-skills"],
-        ["--json", "source", "available-skills", "--all"],
+        ["source", "available-skills"],
+        ["source", "available-skills", "--all"],
     ):
         result = runner.invoke(app, args)
         assert result.exit_code == 0, result.output
         assert _parse_json(result)["data"]["skills"] == []
     # enable cannot resolve it (not found, not a declaration write).
-    result = runner.invoke(app, ["--json", "enable", "tw93/Waza", "evil"])
+    result = runner.invoke(app, ["enable", "tw93/Waza", "evil"])
     assert result.exit_code == 1, result.output
     body = _parse_json(result)
     assert body["error"]["code"] == "not_found"
     assert load_skill_declarations(project / ".skill-manager.json").skills == []
-
-
-def test_available_skills_human_default_omits_archive(tmp_path: Path, make_source_repo) -> None:
-    _seed_cached_source(
-        tmp_path,
-        make_source_repo,
-        {"skills/active": ACTIVE, ".archive/old": ARCHIVED},
-    )
-    result = runner.invoke(app, ["source", "available-skills"])
-    assert result.exit_code == 0
-    assert "active" in result.stdout
-    assert "old" not in result.stdout
-
-
-def test_available_skills_human_all_includes_archive(tmp_path: Path, make_source_repo) -> None:
-    _seed_cached_source(
-        tmp_path,
-        make_source_repo,
-        {"skills/active": ACTIVE, ".archive/old": ARCHIVED},
-    )
-    result = runner.invoke(app, ["source", "available-skills", "--all"])
-    assert result.exit_code == 0
-    assert "active" in result.stdout
-    assert "old" in result.stdout
 
 
 # ── enable resolution ─────────────────────────────────────────────────────────
@@ -258,22 +234,11 @@ def test_json_enable_filtered_name_not_found_hints_all(
     monkeypatch.chdir(project)
 
     for name in ("old", "secret"):
-        result = runner.invoke(app, ["--json", "enable", "tw93/Waza", name])
+        result = runner.invoke(app, ["enable", "tw93/Waza", name])
         assert result.exit_code == 1, result.output
         body = _parse_json(result)
         assert body["error"]["code"] == "not_found"
         assert "--all" in body["error"]["message"]
-
-
-def test_enable_text_filtered_name_hints_all(
-    tmp_path: Path, make_source_repo, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    project, _ = _seed_cached_source(tmp_path, make_source_repo, {".archive/old": ARCHIVED})
-    _write_config(project, [])
-    monkeypatch.chdir(project)
-    result = runner.invoke(app, ["enable", "tw93/Waza", "old"])
-    assert result.exit_code == 1
-    assert "--all" in result.output
 
 
 def test_json_enable_all_resolves_filtered_skill(
@@ -295,7 +260,7 @@ def test_json_enable_all_resolves_filtered_skill(
         capture_output=True,
     )
 
-    result = runner.invoke(app, ["--json", "enable", "--all", "tw93/Waza", "old"])
+    result = runner.invoke(app, ["enable", "--all", "tw93/Waza", "old"])
     assert result.exit_code == 0, result.output
     body = _parse_json(result)
     assert body["ok"] is True
@@ -331,7 +296,7 @@ def test_json_enable_all_resolves_internal(
         capture_output=True,
     )
 
-    result = runner.invoke(app, ["--json", "enable", "--all", "tw93/Waza", "secret"])
+    result = runner.invoke(app, ["enable", "--all", "tw93/Waza", "secret"])
     assert result.exit_code == 0, result.output
     body = _parse_json(result)
     assert body["data"]["results"][0]["skill"]["path"] == "skills/secret"
@@ -344,7 +309,7 @@ def test_json_enable_missing_name_still_hints_when_filtered(
     project, _ = _seed_cached_source(tmp_path, make_source_repo, {"skills/active": ACTIVE})
     _write_config(project, [])
     monkeypatch.chdir(project)
-    result = runner.invoke(app, ["--json", "enable", "tw93/Waza", "missing"])
+    result = runner.invoke(app, ["enable", "tw93/Waza", "missing"])
     assert result.exit_code == 1
     body = _parse_json(result)
     assert body["error"]["code"] == "not_found"
@@ -357,7 +322,7 @@ def test_json_enable_all_missing_name_no_hint(
     project, _ = _seed_cached_source(tmp_path, make_source_repo, {"skills/active": ACTIVE})
     _write_config(project, [])
     monkeypatch.chdir(project)
-    result = runner.invoke(app, ["--json", "enable", "--all", "tw93/Waza", "missing"])
+    result = runner.invoke(app, ["enable", "--all", "tw93/Waza", "missing"])
     assert result.exit_code == 1
     body = _parse_json(result)
     assert body["error"]["code"] == "not_found"
@@ -372,22 +337,25 @@ def test_json_enable_uncached_repo_clone_fails_no_all_hint(
     monkeypatch.chdir(tmp_path)
     _write_config(tmp_path, [])
     monkeypatch.setattr("skill_manager.sources.repo_url", lambda r: "file:///nonexistent/repo")
-    result = runner.invoke(app, ["--json", "enable", "no/such", "read"])
+    result = runner.invoke(app, ["enable", "no/such", "read"])
     assert result.exit_code == 1
     body = _parse_json(result)
     assert body["error"]["code"] == "source_error"
     assert "--all" not in body["error"]["message"]
 
 
-def test_json_enable_without_args_still_usage_error(
+def test_enable_without_args_non_tty_is_not_found(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.chdir(tmp_path)
     _write_config(tmp_path, [])
-    result = runner.invoke(app, ["--json", "enable", "--all"])
-    assert result.exit_code == 2
+    result = runner.invoke(app, ["enable"])
+    assert result.exit_code == 1
     body = _parse_json(result)
-    assert body["error"]["code"] == "usage_error"
+    assert body["error"]["code"] == "not_found"
+    assert body["error"]["message"] == (
+        "interactive enable requires a TTY; pass REPO and NAME(s), or run in a terminal."
+    )
 
 
 def test_enable_interactive_all_includes_archive_via_picker(
@@ -462,11 +430,11 @@ def test_sync_and_list_honor_declared_filtered_path(
         capture_output=True,
     )
 
-    sync_result = runner.invoke(app, ["--json", "sync"])
+    sync_result = runner.invoke(app, ["sync"])
     assert sync_result.exit_code == 0, sync_result.output
     assert (project / ".agents" / "skills" / "old").is_symlink()
 
-    list_result = runner.invoke(app, ["--json", "list"])
+    list_result = runner.invoke(app, ["list"])
     assert list_result.exit_code == 0, list_result.output
     body = _parse_json(list_result)
     assert body["data"]["skills"] == [
@@ -491,7 +459,7 @@ def test_enable_already_enabled_filtered_path_idempotent(
     monkeypatch.chdir(project)
     before = (project / ".skill-manager.json").read_text()
     # Without --all, name is not in default scan — but already_enabled short-circuits.
-    result = runner.invoke(app, ["--json", "enable", "tw93/Waza", "old"])
+    result = runner.invoke(app, ["enable", "tw93/Waza", "old"])
     assert result.exit_code == 0, result.output
     body = _parse_json(result)
     assert body["data"]["results"][0]["action"] == "already_enabled"
@@ -507,7 +475,7 @@ def test_json_available_skills_simple_layout_unchanged(tmp_path: Path, make_sour
         make_source_repo,
         {"skills/read": skill_md("read"), "skills/write": skill_md("write")},
     )
-    result = runner.invoke(app, ["--json", "source", "available-skills"])
+    result = runner.invoke(app, ["source", "available-skills"])
     assert result.exit_code == 0, result.output
     keys = _skill_keys(_parse_json(result)["data"]["skills"])
     assert keys == {("read", "skills/read"), ("write", "skills/write")}

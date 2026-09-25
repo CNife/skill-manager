@@ -65,55 +65,35 @@ class FakePicker:
 # ── empty states: missing declaration = empty config (list / sync) ────────────
 
 
-def test_list_missing_config_empty_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """First-ever ``list`` on a fresh checkout must not error (exit 0 + guidance)."""
-    monkeypatch.chdir(tmp_path)
-    result = runner.invoke(app, ["list"])
-    assert result.exit_code == 0, result.output
-    assert "No skills enabled yet" in result.stdout
-    assert "skill-manager enable" in result.stdout
-    assert "skill-manager source available-skills" in result.stdout
-    assert "Error" not in result.stdout
-
-
-def test_list_global_missing_config_empty_state(
+def test_list_global_missing_config_empty_result(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """``--global list`` with no global declaration file: empty state, no error."""
+    """Global list with no declaration file returns an empty result."""
     monkeypatch.chdir(tmp_path)
     result = runner.invoke(app, ["--global", "list"])
     assert result.exit_code == 0, result.output
-    assert "No skills enabled yet" in result.stdout
-    assert "project config" not in result.output
+    assert result.stderr == ""
+    assert _parse_json(result) == {"ok": True, "data": {"skills": []}}
 
 
 def test_list_json_missing_config_empty_result(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.chdir(tmp_path)
-    result = runner.invoke(app, ["--json", "list"])
+    result = runner.invoke(app, ["list"])
     assert result.exit_code == 0, result.output
+    assert result.stderr == ""
     assert _parse_json(result) == {"ok": True, "data": {"skills": []}}
 
 
-def test_sync_missing_config_nothing_to_sync(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Fresh-env sync reports nothing to sync and exits 0 (no error)."""
-    monkeypatch.chdir(tmp_path)
-    result = runner.invoke(app, ["sync"])
-    assert result.exit_code == 0, result.output
-    assert "Nothing to sync." in result.stdout
-
-
-def test_sync_global_missing_config_nothing_to_sync(
+def test_sync_global_missing_config_empty_result(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.chdir(tmp_path)
     result = runner.invoke(app, ["--global", "sync"])
     assert result.exit_code == 0, result.output
-    assert "Nothing to sync." in result.stdout
-    assert "project config" not in result.output
+    assert result.stderr == ""
+    assert _parse_json(result) == {"ok": True, "data": {"sources": [], "links": []}}
 
 
 def test_sync_json_missing_config_empty_result(
@@ -121,20 +101,24 @@ def test_sync_json_missing_config_empty_result(
 ) -> None:
     """JSON sync on fresh env: normal empty success result, exit 0."""
     monkeypatch.chdir(tmp_path)
-    result = runner.invoke(app, ["--json", "sync"])
+    result = runner.invoke(app, ["sync"])
     assert result.exit_code == 0, result.output
+    assert result.stderr == ""
     assert _parse_json(result) == {"ok": True, "data": {"sources": [], "links": []}}
 
 
 def test_list_zero_byte_config_still_errors(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """list tolerates only a *missing* file: zero-byte content is still an error."""
+    """list tolerates only a missing file: zero-byte content is still an error."""
     monkeypatch.chdir(tmp_path)
     (tmp_path / ".skill-manager.json").write_text("", encoding="utf-8")
     result = runner.invoke(app, ["list"])
     assert result.exit_code == 1
-    assert "invalid JSON" in result.output
+    assert result.stderr == ""
+    body = _parse_json(result)
+    assert body["ok"] is False
+    assert "invalid JSON" in body["error"]["message"]
 
 
 def test_sync_zero_byte_config_still_errors(
@@ -144,36 +128,39 @@ def test_sync_zero_byte_config_still_errors(
     (tmp_path / ".skill-manager.json").write_text("", encoding="utf-8")
     result = runner.invoke(app, ["sync"])
     assert result.exit_code == 1
-    assert "invalid JSON" in result.output
+    assert result.stderr == ""
+    body = _parse_json(result)
+    assert body["ok"] is False
+    assert "invalid JSON" in body["error"]["message"]
 
 
 def test_list_global_bad_json_no_project_config_wording(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Global-scope error wording names the global config, never 'project config'."""
+    """Global-scope errors name the global config, never the project config."""
     monkeypatch.chdir(tmp_path)
     paths.global_skills_config_path().write_text(json.dumps({"skills": 42}), encoding="utf-8")
     result = runner.invoke(app, ["--global", "list"])
     assert result.exit_code == 1
-    assert "global skills config" in result.output
-    assert "project config" not in result.output
+    assert result.stderr == ""
+    body = _parse_json(result)
+    assert body["ok"] is False
+    assert "global skills config" in body["error"]["message"]
+    assert "project config" not in body["error"]["message"]
 
 
 # ── empty states: missing declaration = empty config (disable) ────────────────
 
 
-def test_disable_global_missing_config_empty_state(
+def test_disable_global_missing_config_empty_result(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """``--global disable`` with no global declaration file: idempotent no-op."""
+    """Global disable with no declaration file is an idempotent no-op."""
     monkeypatch.chdir(tmp_path)
     result = runner.invoke(app, ["--global", "disable", "read"])
     assert result.exit_code == 0, result.output
-    assert "not enabled" in result.output
-    assert "project config" not in result.output
-    jresult = runner.invoke(app, ["--json", "--global", "disable", "read"])
-    assert jresult.exit_code == 0, jresult.output
-    assert _parse_json(jresult) == {
+    assert result.stderr == ""
+    assert _parse_json(result) == {
         "ok": True,
         "data": {"results": [{"action": "not_enabled", "skill": {"name": "read"}}]},
     }
@@ -182,16 +169,13 @@ def test_disable_global_missing_config_empty_state(
 def test_disable_global_bad_json_no_project_config_wording(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Global-scope disable error wording names the global config, never 'project config'."""
+    """Global config errors name the global config, never the project config."""
     monkeypatch.chdir(tmp_path)
     paths.global_skills_config_path().write_text(json.dumps({"skills": 42}), encoding="utf-8")
     result = runner.invoke(app, ["--global", "disable", "read"])
     assert result.exit_code == 1
-    assert "global skills config" in result.output
-    assert "project config" not in result.output
-    jresult = runner.invoke(app, ["--json", "--global", "disable", "read"])
-    assert jresult.exit_code == 1
-    body = _parse_json(jresult)
+    assert result.stderr == ""
+    body = _parse_json(result)
     assert body["ok"] is False
     assert body["error"]["code"] == "config_error"
     assert "global skills config" in body["error"]["message"]
@@ -201,18 +185,11 @@ def test_disable_global_bad_json_no_project_config_wording(
 # ── source list empty state ───────────────────────────────────────────────────
 
 
-def test_source_list_empty_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """source list with no registered sources says so instead of printing nothing."""
+def test_source_list_json_empty(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.chdir(tmp_path)
     result = runner.invoke(app, ["source", "list"])
     assert result.exit_code == 0, result.output
-    assert "No sources registered (use 'source add' first)" in result.stdout
-
-
-def test_source_list_json_empty(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.chdir(tmp_path)
-    result = runner.invoke(app, ["--json", "source", "list"])
-    assert result.exit_code == 0, result.output
+    assert result.stderr == ""
     assert _parse_json(result) == {"ok": True, "data": {"sources": []}}
 
 
@@ -222,17 +199,20 @@ def test_source_list_json_empty(tmp_path: Path, monkeypatch: pytest.MonkeyPatch)
 def test_enable_repo_not_found_has_available_skills_hint(
     tmp_path: Path, make_source_repo, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Repo-mode enable not-found names the listing command and keeps the --all hint."""
+    """Repo-mode enable errors retain the listing command and --all hint."""
     project = _seed_cached_source(tmp_path, make_source_repo)
     monkeypatch.chdir(project)
     result = runner.invoke(app, ["enable", "tw93/Waza", "missing-skill"])
     assert result.exit_code == 1
-    assert "not found in cached repo 'tw93/Waza'" in result.output
+    assert result.stderr == ""
+    body = _parse_json(result)
+    assert body["ok"] is False
+    message = body["error"]["message"]
+    assert "not found in cached repo 'tw93/Waza'" in message
     assert (
-        "run 'skill-manager source available-skills tw93/Waza' to list available skills"
-        in result.output
+        "run 'skill-manager source available-skills tw93/Waza' to list available skills" in message
     )
-    assert "--all" in result.output
+    assert "--all" in message
 
 
 def test_available_skills_uncached_repo_hint(tmp_path: Path, monkeypatch) -> None:
@@ -240,8 +220,11 @@ def test_available_skills_uncached_repo_hint(tmp_path: Path, monkeypatch) -> Non
     monkeypatch.chdir(tmp_path)
     result = runner.invoke(app, ["source", "available-skills", "no/such"])
     assert result.exit_code == 1
-    assert "source repo 'no/such' is not cached" in result.output
-    assert "use 'source add no/such' first" in result.output
+    assert result.stderr == ""
+    body = _parse_json(result)
+    assert body["ok"] is False
+    assert "source repo 'no/such' is not cached" in body["error"]["message"]
+    assert "use 'source add no/such' first" in body["error"]["message"]
 
 
 def test_enable_interactive_no_cached_repos_guidance(tmp_path: Path) -> None:
@@ -290,10 +273,11 @@ def test_enable_interactive_no_qualified_hint(tmp_path: Path, make_source_repo) 
 
 
 def test_json_error_envelope_no_hint_field(tmp_path: Path, monkeypatch) -> None:
-    """JSON error envelope stays {code, message} — hints live in message text only."""
+    """JSON errors stay on stdout with {code, message}; hints remain in the message."""
     monkeypatch.chdir(tmp_path)
-    result = runner.invoke(app, ["--json", "source", "available-skills", "no/such"])
+    result = runner.invoke(app, ["source", "available-skills", "no/such"])
     assert result.exit_code == 1
+    assert result.stderr == ""
     body = _parse_json(result)
     assert body["ok"] is False
     assert set(body["error"].keys()) == {"code", "message"}
@@ -304,13 +288,14 @@ def test_json_error_envelope_no_hint_field(tmp_path: Path, monkeypatch) -> None:
 def test_source_remove_warning_visibility_boundary(
     tmp_path: Path, make_source_repo, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Remove warning names the checked scopes and the boundary (other projects)."""
+    """JSON source removal omits the human-only reference note."""
     _seed_cached_source(tmp_path, make_source_repo)
     project = tmp_path / "proj"
     _write_config(project, [{"name": "read", "repo": "tw93/Waza", "path": "skills/read"}])
     monkeypatch.chdir(project)
     result = runner.invoke(app, ["source", "remove", "tw93/Waza"])
     assert result.exit_code == 0, result.output
-    assert "still referenced" in result.output
-    assert "project" in result.output
-    assert "(other projects not checked)" in result.output
+    assert result.stderr == ""
+    body = _parse_json(result)
+    assert body == {"ok": True, "data": {"action": "removed", "repo": "tw93/Waza"}}
+    assert "warnings" not in body

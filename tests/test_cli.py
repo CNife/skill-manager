@@ -23,6 +23,12 @@ def _write_config(project: Path, skills: list[dict]) -> None:
     (project / ".skill-manager.json").write_text(json.dumps({"skills": skills}), encoding="utf-8")
 
 
+def _parse_json(result) -> dict:
+    assert result.stdout.strip(), f"empty stdout; stderr={result.stderr!r} output={result.output!r}"
+    assert result.stderr == ""
+    return json.loads(result.stdout)
+
+
 def test_version_option() -> None:
     from skill_manager import __version__
 
@@ -49,7 +55,7 @@ def test_sync_missing_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) ->
     monkeypatch.chdir(tmp_path)
     result = runner.invoke(app, ["sync"])
     assert result.exit_code == 0
-    assert "Nothing to sync." in result.output
+    assert _parse_json(result) == {"ok": True, "data": {"sources": [], "links": []}}
 
 
 def test_sync_bad_json(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -57,7 +63,10 @@ def test_sync_bad_json(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     (tmp_path / ".skill-manager.json").write_text("{bad", encoding="utf-8")
     result = runner.invoke(app, ["sync"])
     assert result.exit_code == 1
-    assert "invalid JSON" in result.output
+    body = _parse_json(result)
+    assert body["ok"] is False
+    assert body["error"]["code"] == "config_error"
+    assert "invalid JSON" in body["error"]["message"]
 
 
 def test_run_sync_end_to_end(tmp_path: Path, make_source_repo) -> None:
@@ -188,21 +197,24 @@ def test_disable_help() -> None:
 
 
 def test_enable_no_cache(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Interactive enable on non-TTY fails before opening a picker (exit 1)."""
+    """Interactive enable on non-TTY returns a not-found JSON error (exit 1)."""
     monkeypatch.chdir(tmp_path)
     _write_config(tmp_path, [])
     result = runner.invoke(app, ["enable"])
     assert result.exit_code == 1
-    assert "TTY" in result.output
+    body = _parse_json(result)
+    assert body["ok"] is False
+    assert body["error"]["code"] == "not_found"
+    assert "TTY" in body["error"]["message"]
 
 
 def test_disable_no_skills(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """disable with no enabled skills prints message."""
+    """disable with no enabled skills returns an empty result list."""
     monkeypatch.chdir(tmp_path)
     _write_config(tmp_path, [])
     result = runner.invoke(app, ["disable"])
     assert result.exit_code == 0
-    assert "No enabled skills to disable" in result.output
+    assert _parse_json(result) == {"ok": True, "data": {"results": []}}
 
 
 def _enable_test_env(tmp_path: Path, make_source_repo):
@@ -436,11 +448,11 @@ def test_source_list_help() -> None:
 
 
 def test_source_list_empty(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """source list with no registered sources prints the empty-state line."""
+    """source list with no registered sources returns an empty collection."""
     monkeypatch.chdir(tmp_path)
     result = runner.invoke(app, ["source", "list"])
     assert result.exit_code == 0
-    assert result.stdout.strip() == "No sources registered (use 'source add' first)"
+    assert _parse_json(result) == {"ok": True, "data": {"sources": []}}
 
 
 def test_source_add_invalid_repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -448,7 +460,10 @@ def test_source_add_invalid_repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     monkeypatch.chdir(tmp_path)
     result = runner.invoke(app, ["source", "add", "not-owner-repo"])
     assert result.exit_code == 1
-    assert "invalid repo" in result.output
+    body = _parse_json(result)
+    assert body["ok"] is False
+    assert body["error"]["code"] == "config_error"
+    assert "invalid repo" in body["error"]["message"]
 
 
 def test_source_remove_not_found(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -456,11 +471,14 @@ def test_source_remove_not_found(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     monkeypatch.chdir(tmp_path)
     result = runner.invoke(app, ["source", "remove", "x/y"])
     assert result.exit_code == 1
-    assert "not found" in result.output
+    body = _parse_json(result)
+    assert body["ok"] is False
+    assert body["error"]["code"] == "not_found"
+    assert "not found" in body["error"]["message"]
 
 
 def test_source_list_shows_registered(tmp_path: Path) -> None:
-    """source list shows registered sources with cached status."""
+    """source list returns registered source details and the cache is present."""
     from skill_manager import paths
     from skill_manager.config import GlobalConfig, Source, save_global_config
 
@@ -475,14 +493,23 @@ def test_source_list_shows_registered(tmp_path: Path) -> None:
     )
     result = runner.invoke(app, ["source", "list"])
     assert result.exit_code == 0
-    assert "tw93/Waza" in result.stdout
-    assert "abc1234" in result.stdout
-    assert "cached" in result.stdout
-    assert "github.com/tw93/Waza" in result.stdout
+    assert _parse_json(result) == {
+        "ok": True,
+        "data": {
+            "sources": [
+                {
+                    "repo": "tw93/Waza",
+                    "commit": "abc1234",
+                    "url": "https://github.com/tw93/Waza.git",
+                }
+            ]
+        },
+    }
+    assert (paths.repos_cache_dir() / "tw93" / "Waza").is_dir()
 
 
 def test_source_add_duplicate(tmp_path: Path) -> None:
-    """source add on already-registered + cached source says already exists."""
+    """source add on an already-registered cached source reports already_exists."""
     from skill_manager import paths
     from skill_manager.config import GlobalConfig, Source, save_global_config
 
@@ -497,7 +524,10 @@ def test_source_add_duplicate(tmp_path: Path) -> None:
     )
     result = runner.invoke(app, ["source", "add", "tw93/Waza"])
     assert result.exit_code == 0
-    assert "already exists" in result.stdout
+    assert _parse_json(result) == {
+        "ok": True,
+        "data": {"action": "already_exists", "repo": "tw93/Waza", "commit": "abc1234"},
+    }
 
 
 def test_source_remove_existing(tmp_path: Path) -> None:
@@ -516,16 +546,16 @@ def test_source_remove_existing(tmp_path: Path) -> None:
     )
     result = runner.invoke(app, ["source", "remove", "tw93/Waza"])
     assert result.exit_code == 0
-    assert "removed" in result.stdout
+    assert _parse_json(result) == {"ok": True, "data": {"action": "removed", "repo": "tw93/Waza"}}
     assert not (paths.repos_cache_dir() / "tw93" / "Waza").exists()
     cfg = load_global_config(paths.config_file())
     assert "tw93/Waza" not in cfg.sources
 
 
-def test_source_remove_warns_on_project_ref(
+def test_source_remove_project_ref_json_success(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """source remove warns if project skills still reference the repo."""
+    """source remove succeeds for a referenced repo without a JSON warning field."""
     from skill_manager import paths
     from skill_manager.config import GlobalConfig, Source, save_global_config
 
@@ -542,8 +572,7 @@ def test_source_remove_warns_on_project_ref(
     _write_config(Path.cwd(), [{"name": "read", "repo": "tw93/Waza", "path": "skills/read"}])
     result = runner.invoke(app, ["source", "remove", "tw93/Waza"])
     assert result.exit_code == 0
-    assert "warning" in result.output
-    assert "removed" in result.stdout
+    assert _parse_json(result) == {"ok": True, "data": {"action": "removed", "repo": "tw93/Waza"}}
 
 
 @pytest.mark.network
@@ -577,9 +606,11 @@ def test_source_add_network(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> 
 
     result = runner.invoke(app, ["source", "list"])
     assert result.exit_code == 0
-    assert "test/foo" in result.stdout
-    assert "cached" in result.stdout
-    assert head[:8] in result.stdout
+    assert _parse_json(result) == {
+        "ok": True,
+        "data": {"sources": [{"repo": "test/foo", "commit": head, "url": url}]},
+    }
+    assert (paths.repos_cache_dir() / "test" / "foo").is_dir()
 
 
 def test_source_update_help() -> None:

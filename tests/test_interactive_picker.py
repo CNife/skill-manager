@@ -143,14 +143,13 @@ def test_enable_locked_and_empty_submit(tmp_path: Path, make_source_repo) -> Non
     _write_config(project, [{"name": "read", "repo": "tw93/Waza", "path": "skills/read"}])
     before = (project / ".skill-manager.json").read_text()
     choices_out: list = []
-    messages: list[str] = []
     result = run_enable(
         project / ".skill-manager.json",
         gconfig,
         cache,
         skills_dir,
         url_resolver=lambda _r: f"file://{upstream}",
-        emit=messages.append,
+        progress=None,
         picker=FakePicker(
             source="tw93/Waza",
             enable_names=[],  # empty submit
@@ -160,7 +159,6 @@ def test_enable_locked_and_empty_submit(tmp_path: Path, make_source_repo) -> Non
     assert result.outcomes == []
     assert result.sync is None
     assert (project / ".skill-manager.json").read_text() == before
-    assert any("Nothing to enable" in m for m in messages)
     locked = {c.name: c.locked for c in choices_out[0]}
     assert locked["read"] is True
     assert locked["write"] is False
@@ -205,20 +203,18 @@ def test_enable_interactive_empty_still_surfaces_global_warning(
     project, cache, gconfig, skills_dir, upstream = _env(tmp_path, make_source_repo)
     _write_config(project, [])
     paths.global_skills_config_path().write_text("{bad", encoding="utf-8")
-    messages: list[str] = []
     result = run_enable(
         project / ".skill-manager.json",
         gconfig,
         cache,
         skills_dir,
         url_resolver=lambda _r: f"file://{upstream}",
-        emit=messages.append,
+        progress=None,
         picker=FakePicker(source="tw93/Waza", enable_names=[]),
     )
     assert result.outcomes == []
     assert result.warnings
     assert result.warnings[0]["code"] == "global_config_error"
-    assert any("Warning:" in m for m in messages)
 
 
 def test_enable_selects_and_syncs_once(tmp_path: Path, make_source_repo) -> None:
@@ -358,17 +354,17 @@ def test_disable_no_enabled_exit_ok(tmp_path: Path) -> None:
     project = tmp_path / "proj"
     project.mkdir()
     _write_config(project, [])
-    messages: list[str] = []
+    before = (project / ".skill-manager.json").read_text()
     result = run_disable(
         project / ".skill-manager.json",
         tmp_path / "cfg.json",
         tmp_path / "cache",
         project / ".agents" / "skills",
-        emit=messages.append,
+        progress=None,
         picker=FakePicker(),  # must not be called
     )
     assert result.outcomes == []
-    assert any("No enabled skills to disable" in m for m in messages)
+    assert (project / ".skill-manager.json").read_text() == before
 
 
 def test_disable_cancel_no_writes(tmp_path: Path, make_source_repo) -> None:
@@ -398,18 +394,16 @@ def test_disable_empty_submit_no_writes(tmp_path: Path, make_source_repo) -> Non
     project, cache, gconfig, skills_dir, _upstream = _env(tmp_path, make_source_repo)
     _write_config(project, [{"name": "read", "repo": "tw93/Waza", "path": "skills/read"}])
     before = (project / ".skill-manager.json").read_text()
-    messages: list[str] = []
     result = run_disable(
         project / ".skill-manager.json",
         gconfig,
         cache,
         skills_dir,
-        emit=messages.append,
+        progress=None,
         picker=FakePicker(disable_names=[]),
     )
     assert result.outcomes == []
     assert (project / ".skill-manager.json").read_text() == before
-    assert any("Nothing to disable" in m for m in messages)
 
 
 def test_disable_selects_and_cleans(tmp_path: Path, make_source_repo) -> None:

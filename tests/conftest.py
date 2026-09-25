@@ -4,10 +4,16 @@ Provides a file:// source-repo factory (offline GitHub stand-in) and XDG
 isolation so tests never touch the real ~/.config or ~/.cache.
 """
 
-from __future__ import annotations
-
+import fcntl
+import os
+import pty
+import struct
 import subprocess
+import sys
+import tempfile
+import termios
 from pathlib import Path
+from typing import NamedTuple
 
 import pytest
 
@@ -76,3 +82,86 @@ def git():
         subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True)
 
     return _git
+
+
+class PtyRun(NamedTuple):
+    """Output of one CLI run in a pty: the terminal session plus exit code.
+
+    ``out`` is stdout as a terminal saw it (ANSI and CRLF intact), ``err`` is
+    stderr. human/machine artifacts are asserted per stream, because the tracks
+    themselves split on stdout.
+    """
+
+    out: str
+    err: str
+    exit_code: int
+
+    @property
+    def text(self) -> str:
+        """stdout with CRLF/CR folded to LF (a pty writes ONLCR)."""
+        return self.out.replace("\r\n", "\n").replace("\r", "\n")
+
+    @property
+    def lines(self) -> list[str]:
+        return self.text.splitlines()
+
+    @property
+    def err_lines(self) -> list[str]:
+        return self.err.replace("\r\n", "\n").splitlines()
+
+
+@pytest.fixture
+def run_in_pty():
+    """Run ``python -m skill_manager <args>`` with stdout on a real pty.
+
+    The second driver at the CLI seam: CliRunner proves the JSON track (its
+    stdout is a pipe), a pty proves the Human track. stderr goes to a temp file
+    (a pipe could fill up and deadlock the child), so a run with stdout on the
+    pty also proves the track is decided by stdout alone.
+    ``width`` fixes the terminal size via ``TIOCSWINSZ`` so layout assertions
+    are deterministic.
+    """
+
+    def _run(
+        args: list[str],
+        *,
+        width: int = 100,
+        cwd: Path | None = None,
+        env: dict[str, str] | None = None,
+    ) -> PtyRun:
+        master, slave = pty.openpty()
+        try:
+            fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 40, width, 0, 0))
+            child_env = dict(os.environ)
+            # A developer's NO_COLOR would hide the very ANSI we assert on.
+            child_env.pop("NO_COLOR", None)
+            child_env["TERM"] = "xterm-256color"
+            child_env.update(env or {})
+            with tempfile.TemporaryFile() as err_file:
+                proc = subprocess.Popen(
+                    [sys.executable, "-m", "skill_manager", *args],
+                    stdin=slave,
+                    stdout=slave,
+                    stderr=err_file,
+                    cwd=str(cwd) if cwd is not None else None,
+                    env=child_env,
+                    close_fds=True,
+                )
+                os.close(slave)
+                chunks: list[bytes] = []
+                while True:
+                    try:
+                        data = os.read(master, 65536)
+                    except OSError:  # EIO: the slave side is gone
+                        break
+                    if not data:
+                        break
+                    chunks.append(data)
+                exit_code = proc.wait()
+                err_file.seek(0)
+                stderr = err_file.read().decode("utf-8", errors="replace")
+        finally:
+            os.close(master)
+        return PtyRun(b"".join(chunks).decode("utf-8", errors="replace"), stderr, exit_code)
+
+    return _run

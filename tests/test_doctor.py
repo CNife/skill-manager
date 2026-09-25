@@ -1,8 +1,8 @@
 """Tests for the doctor command (issue #51).
 
-Single seam: CliRunner.invoke(app, ["doctor"]) / ["--json", "doctor"].
-Each test constructs one inconsistent state and asserts the corresponding
-problem code appears in the output. Healthy state asserts no problems.
+Single seam: CliRunner.invoke(app, ["doctor"]). CliRunner stdout is non-TTY,
+so each invocation exercises the JSON track. Each test constructs one
+inconsistent state and asserts the corresponding problem code appears.
 """
 
 from __future__ import annotations
@@ -79,18 +79,10 @@ def _find(body: dict, code: str) -> dict:
 # ── healthy state ─────────────────────────────────────────────────────────────
 
 
-def test_doctor_healthy_state(tmp_path, make_source_repo, monkeypatch) -> None:
-    """A fully synced project with no issues reports 'No problems found.'"""
-    _seed_synced_project(tmp_path, make_source_repo, monkeypatch)
-    result = runner.invoke(app, ["doctor"])
-    assert result.exit_code == 0
-    assert "No problems found." in result.output
-
-
 def test_doctor_json_healthy(tmp_path, make_source_repo, monkeypatch) -> None:
     """Healthy state returns ok=true with an empty problems array."""
     _seed_synced_project(tmp_path, make_source_repo, monkeypatch)
-    result = runner.invoke(app, ["--json", "doctor"])
+    result = runner.invoke(app, ["doctor"])
     assert result.exit_code == 0
     body = _parse_json(result)
     assert body["ok"] is True
@@ -106,7 +98,7 @@ def test_doctor_declaration_parse_error_project(tmp_path, monkeypatch) -> None:
     project.mkdir()
     (project / ".skill-manager.json").write_text("{bad json", encoding="utf-8")
     monkeypatch.chdir(project)
-    result = runner.invoke(app, ["--json", "doctor"])
+    result = runner.invoke(app, ["doctor"])
     assert result.exit_code == 0
     body = _parse_json(result)
     assert "declaration_parse_error" in _codes(body)
@@ -120,7 +112,7 @@ def test_doctor_declaration_parse_error_global(tmp_path, monkeypatch) -> None:
     global_decl = paths.global_skills_config_path()
     global_decl.parent.mkdir(parents=True, exist_ok=True)
     global_decl.write_text("{bad json", encoding="utf-8")
-    result = runner.invoke(app, ["--json", "doctor"])
+    result = runner.invoke(app, ["doctor"])
     assert result.exit_code == 0
     body = _parse_json(result)
     assert "declaration_parse_error" in _codes(body)
@@ -134,7 +126,7 @@ def test_doctor_global_config_parse_error(tmp_path, monkeypatch) -> None:
     config_file = paths.config_file()
     config_file.parent.mkdir(parents=True, exist_ok=True)
     config_file.write_text("{bad json", encoding="utf-8")
-    result = runner.invoke(app, ["--json", "doctor"])
+    result = runner.invoke(app, ["doctor"])
     assert result.exit_code == 0
     body = _parse_json(result)
     assert "global_config_parse_error" in _codes(body)
@@ -151,7 +143,7 @@ def test_doctor_declared_source_not_registered(tmp_path, monkeypatch) -> None:
     project.mkdir()
     _write_config(project, [{"name": "read", "repo": "foo/bar", "path": "skills/read"}])
     monkeypatch.chdir(project)
-    result = runner.invoke(app, ["--json", "doctor"])
+    result = runner.invoke(app, ["doctor"])
     assert result.exit_code == 0
     body = _parse_json(result)
     assert "declared_source_not_registered" in _codes(body)
@@ -166,7 +158,7 @@ def test_doctor_registered_source_cache_missing(tmp_path, make_source_repo, monk
     project, _ = _seed_cached_source(tmp_path, make_source_repo)
     monkeypatch.chdir(project)
     shutil.rmtree(paths.repos_cache_dir() / "tw93/Waza")
-    result = runner.invoke(app, ["--json", "doctor"])
+    result = runner.invoke(app, ["doctor"])
     assert result.exit_code == 0
     body = _parse_json(result)
     assert "registered_source_cache_missing" in _codes(body)
@@ -176,7 +168,7 @@ def test_doctor_orphan_source_registered(tmp_path, make_source_repo, monkeypatch
     """A registered+cached source with no declaration referencing it is reported."""
     project, _ = _seed_cached_source(tmp_path, make_source_repo)
     monkeypatch.chdir(project)
-    result = runner.invoke(app, ["--json", "doctor"])
+    result = runner.invoke(app, ["doctor"])
     assert result.exit_code == 0
     body = _parse_json(result)
     assert "orphan_source_registered" in _codes(body)
@@ -190,7 +182,7 @@ def test_doctor_orphan_source_cache(tmp_path, monkeypatch) -> None:
     monkeypatch.chdir(tmp_path)
     cache_repo = paths.repos_cache_dir() / "foo" / "bar"
     cache_repo.mkdir(parents=True)
-    result = runner.invoke(app, ["--json", "doctor"])
+    result = runner.invoke(app, ["doctor"])
     assert result.exit_code == 0
     body = _parse_json(result)
     assert "orphan_source_cache" in _codes(body)
@@ -209,7 +201,7 @@ def test_doctor_head_drift(tmp_path, make_source_repo, git, monkeypatch) -> None
     git(["config", "user.name", "Test"], cache_repo)
     git(["add", "new_file.txt"], cache_repo)
     git(["commit", "-m", "drift"], cache_repo)
-    result = runner.invoke(app, ["--json", "doctor"])
+    result = runner.invoke(app, ["doctor"])
     assert result.exit_code == 0
     body = _parse_json(result)
     assert "head_drift" in _codes(body)
@@ -225,7 +217,7 @@ def test_doctor_unlinked(tmp_path, make_source_repo, monkeypatch) -> None:
     project, _ = _seed_cached_source(tmp_path, make_source_repo)
     _write_config(project, [{"name": "read", "repo": "tw93/Waza", "path": "skills/read"}])
     monkeypatch.chdir(project)
-    result = runner.invoke(app, ["--json", "doctor"])
+    result = runner.invoke(app, ["doctor"])
     assert result.exit_code == 0
     body = _parse_json(result)
     assert "unlinked" in _codes(body)
@@ -240,7 +232,7 @@ def test_doctor_unlinked_global_scope_fix(tmp_path, make_source_repo, monkeypatc
     project, _ = _seed_cached_source(tmp_path, make_source_repo)
     _write_global_skills([{"name": "read", "repo": "tw93/Waza", "path": "skills/read"}])
     monkeypatch.chdir(project)
-    result = runner.invoke(app, ["--json", "doctor"])
+    result = runner.invoke(app, ["doctor"])
     assert result.exit_code == 0
     body = _parse_json(result)
     prob = _find(body, "unlinked")
@@ -252,7 +244,7 @@ def test_doctor_broken_link(tmp_path, make_source_repo, monkeypatch) -> None:
     """A link whose target directory was deleted is reported as broken."""
     _seed_synced_project(tmp_path, make_source_repo, monkeypatch)
     shutil.rmtree(paths.repos_cache_dir() / "tw93/Waza" / "skills" / "read")
-    result = runner.invoke(app, ["--json", "doctor"])
+    result = runner.invoke(app, ["doctor"])
     assert result.exit_code == 0
     body = _parse_json(result)
     assert "broken_link" in _codes(body)
@@ -268,7 +260,7 @@ def test_doctor_external_link(tmp_path, make_source_repo, monkeypatch) -> None:
     # Point to repo root instead of the declared skills/read path
     wrong_target = paths.repos_cache_dir() / "tw93/Waza"
     (skills_dir / "read").symlink_to(wrong_target)
-    result = runner.invoke(app, ["--json", "doctor"])
+    result = runner.invoke(app, ["doctor"])
     assert result.exit_code == 0
     body = _parse_json(result)
     assert "external_link" in _codes(body)
@@ -284,7 +276,7 @@ def test_doctor_orphan_link(tmp_path, make_source_repo, monkeypatch) -> None:
     target = tmp_path / "orphan_target"
     target.mkdir()
     (skills_dir / "orphan").symlink_to(target)
-    result = runner.invoke(app, ["--json", "doctor"])
+    result = runner.invoke(app, ["doctor"])
     assert result.exit_code == 0
     body = _parse_json(result)
     assert "orphan_link" in _codes(body)
@@ -297,7 +289,7 @@ def test_doctor_declared_path_invalid(tmp_path, make_source_repo, monkeypatch) -
     project, _ = _seed_cached_source(tmp_path, make_source_repo)
     _write_config(project, [{"name": "read", "repo": "tw93/Waza", "path": "skills/nonexistent"}])
     monkeypatch.chdir(project)
-    result = runner.invoke(app, ["--json", "doctor"])
+    result = runner.invoke(app, ["doctor"])
     assert result.exit_code == 0
     body = _parse_json(result)
     assert "declared_path_invalid" in _codes(body)
@@ -324,7 +316,7 @@ def test_doctor_cross_scope_conflict(tmp_path, make_source_repo, monkeypatch) ->
     _write_global_skills([{"name": "read", "repo": "other/Repo", "path": "skills/read"}])
     monkeypatch.chdir(project)
 
-    result = runner.invoke(app, ["--json", "doctor"])
+    result = runner.invoke(app, ["doctor"])
     assert result.exit_code == 0
     body = _parse_json(result)
     assert "cross_scope_conflict" in _codes(body)
@@ -342,7 +334,7 @@ def test_doctor_cross_scope_same_source_no_conflict(
     _write_global_skills([{"name": "read", "repo": "tw93/Waza", "path": "skills/read"}])
     monkeypatch.chdir(project)
 
-    result = runner.invoke(app, ["--json", "doctor"])
+    result = runner.invoke(app, ["doctor"])
     assert result.exit_code == 0
     body = _parse_json(result)
     assert "cross_scope_conflict" not in _codes(body)
@@ -358,7 +350,7 @@ def test_doctor_cache_detached_head(tmp_path, make_source_repo, git, monkeypatch
     monkeypatch.chdir(project)
     cache_repo = paths.repos_cache_dir() / "tw93/Waza"
     git(["checkout", "--detach"], cache_repo)
-    result = runner.invoke(app, ["--json", "doctor"])
+    result = runner.invoke(app, ["doctor"])
     assert result.exit_code == 0
     body = _parse_json(result)
     assert "cache_detached_head" in _codes(body)
@@ -371,7 +363,7 @@ def test_doctor_cache_dirty(tmp_path, make_source_repo, monkeypatch) -> None:
     monkeypatch.chdir(project)
     skill_file = paths.repos_cache_dir() / "tw93/Waza" / "skills" / "read" / "SKILL.md"
     skill_file.write_text("modified content", encoding="utf-8")
-    result = runner.invoke(app, ["--json", "doctor"])
+    result = runner.invoke(app, ["doctor"])
     assert result.exit_code == 0
     body = _parse_json(result)
     assert "cache_dirty" in _codes(body)
@@ -384,7 +376,7 @@ def test_doctor_cache_dirty_ignores_untracked(tmp_path, make_source_repo, monkey
     monkeypatch.chdir(project)
     cache_repo = paths.repos_cache_dir() / "tw93/Waza"
     (cache_repo / "untracked.txt").write_text("noise", encoding="utf-8")
-    result = runner.invoke(app, ["--json", "doctor"])
+    result = runner.invoke(app, ["doctor"])
     assert result.exit_code == 0
     body = _parse_json(result)
     assert "cache_dirty" not in _codes(body)
@@ -397,14 +389,14 @@ def test_doctor_xdg_path_issue(tmp_path, monkeypatch) -> None:
     """A relative XDG_CACHE_HOME is reported as xdg_path_issue."""
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("XDG_CACHE_HOME", "relative/path")
-    result = runner.invoke(app, ["--json", "doctor"])
+    result = runner.invoke(app, ["doctor"])
     assert result.exit_code == 0
     body = _parse_json(result)
     assert "xdg_path_issue" in _codes(body)
 
 
 def test_doctor_cache_dir_not_writable(tmp_path, make_source_repo, monkeypatch) -> None:
-    """A read-only cache directory is reported as cache_dir_not_writable."""
+    """A read-only source cache is reported as cache_dir_not_writable."""
     if hasattr(os, "geteuid") and os.geteuid() == 0:
         pytest.skip("root bypasses permission checks")
     project, _ = _seed_cached_source(tmp_path, make_source_repo)
@@ -413,27 +405,19 @@ def test_doctor_cache_dir_not_writable(tmp_path, make_source_repo, monkeypatch) 
     cache_root.chmod(0o500)
     try:
         result = runner.invoke(app, ["doctor"])
-        assert result.exit_code == 0
-        assert "cache_dir_not_writable" in result.output
     finally:
         cache_root.chmod(0o700)
+    assert result.exit_code == 0
+    assert "cache_dir_not_writable" in _codes(_parse_json(result))
 
 
 # ── --global rejection ────────────────────────────────────────────────────────
 
 
-def test_doctor_rejects_global_flag(tmp_path, monkeypatch) -> None:
-    """doctor --global is a usage error (exit 2)."""
+def test_doctor_json_rejects_global_flag(tmp_path, monkeypatch) -> None:
+    """The JSON track wraps rejected global usage in an error envelope."""
     monkeypatch.chdir(tmp_path)
     result = runner.invoke(app, ["--global", "doctor"])
-    assert result.exit_code == 2
-    assert "does not accept --global" in result.output
-
-
-def test_doctor_json_rejects_global_flag(tmp_path, monkeypatch) -> None:
-    """--json --global doctor produces a JSON usage_error envelope."""
-    monkeypatch.chdir(tmp_path)
-    result = runner.invoke(app, ["--json", "--global", "doctor"])
     assert result.exit_code == 2
     body = _parse_json(result)
     assert body["ok"] is False
@@ -449,7 +433,7 @@ def test_doctor_json_problem_structure(tmp_path, make_source_repo, monkeypatch) 
     project, _ = _seed_cached_source(tmp_path, make_source_repo)
     _write_config(project, [{"name": "read", "repo": "tw93/Waza", "path": "skills/read"}])
     monkeypatch.chdir(project)
-    result = runner.invoke(app, ["--json", "doctor"])
+    result = runner.invoke(app, ["doctor"])
     assert result.exit_code == 0
     body = _parse_json(result)
     assert body["ok"] is True
@@ -465,15 +449,6 @@ def test_doctor_json_problem_structure(tmp_path, make_source_repo, monkeypatch) 
                 assert isinstance(prob[opt_field], str)
 
 
-def test_doctor_json_flag_after_subcommand(tmp_path, monkeypatch) -> None:
-    """--json may follow the subcommand (argv normalization)."""
-    monkeypatch.chdir(tmp_path)
-    result = runner.invoke(app, ["doctor", "--json"])
-    assert result.exit_code == 0
-    body = _parse_json(result)
-    assert body["ok"] is True
-
-
 # ── non-blocking ──────────────────────────────────────────────────────────────
 
 
@@ -486,7 +461,7 @@ def test_doctor_non_blocking_multiple_parse_errors(tmp_path, monkeypatch) -> Non
     config_file.parent.mkdir(parents=True, exist_ok=True)
     config_file.write_text("{also bad", encoding="utf-8")
     monkeypatch.chdir(project)
-    result = runner.invoke(app, ["--json", "doctor"])
+    result = runner.invoke(app, ["doctor"])
     assert result.exit_code == 0
     body = _parse_json(result)
     codes = _codes(body)
@@ -505,31 +480,3 @@ def test_doctor_exit_code_zero_with_problems(tmp_path, monkeypatch) -> None:
     monkeypatch.chdir(project)
     result = runner.invoke(app, ["doctor"])
     assert result.exit_code == 0
-
-
-# ── human output ──────────────────────────────────────────────────────────────
-
-
-def test_doctor_human_grouped_output(tmp_path, make_source_repo, monkeypatch) -> None:
-    """Human output groups problems by category with code: message and -> fix: lines."""
-    project, _ = _seed_cached_source(tmp_path, make_source_repo)
-    _write_config(project, [{"name": "read", "repo": "tw93/Waza", "path": "skills/read"}])
-    monkeypatch.chdir(project)
-    result = runner.invoke(app, ["doctor"])
-    assert result.exit_code == 0
-    lines = result.output.splitlines()
-    # Category header
-    assert any(ln == "Link:" for ln in lines)
-    # Problem line: indented "code: message"
-    assert any(ln.startswith("  unlinked:") for ln in lines)
-    # Fix line: further indented "-> fix: ..."
-    assert any(ln.startswith("    -> fix:") for ln in lines)
-
-
-def test_doctor_human_no_ansi_when_captured(tmp_path, make_source_repo, monkeypatch) -> None:
-    """CliRunner captures are non-TTY: no ANSI escape codes in doctor output."""
-    project, _ = _seed_cached_source(tmp_path, make_source_repo)
-    _write_config(project, [{"name": "read", "repo": "tw93/Waza", "path": "skills/read"}])
-    monkeypatch.chdir(project)
-    result = runner.invoke(app, ["doctor"])
-    assert "\x1b[" not in result.output

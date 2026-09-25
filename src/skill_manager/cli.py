@@ -1,7 +1,8 @@
 """skill-manager CLI entry point.
 
-Provides the Typer app, command orchestration, text/JSON rendering, and
-console_scripts target.
+Command orchestration plus the JSON envelope. Everything a human reads is
+rendered by :mod:`skill_manager.render`; stdout decides which of the two
+tracks runs (see ``render.is_tty``).
 """
 
 from __future__ import annotations
@@ -10,15 +11,16 @@ import json
 import os
 import sys
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Annotated, Any
 
 import typer
+from rich.console import Console
 from typer import _click as click
 from typer.core import TyperGroup
 
-from skill_manager import __version__, config, links, paths, sources
+from skill_manager import __version__, config, links, paths, render, sources
 from skill_manager.config import ConfigError, SkillRef
 from skill_manager.links import LinkError
 from skill_manager.picker import (
@@ -29,157 +31,25 @@ from skill_manager.picker import (
     SourceChoice,
     stdin_stdout_are_tty,
 )
+from skill_manager.render import ProgressSink
+from skill_manager.results import (
+    AvailableSkillsResult,
+    DisableOutcome,
+    DisableResult,
+    DoctorProblem,
+    DoctorResult,
+    EnableOutcome,
+    EnableResult,
+    LinkDone,
+    ListResult,
+    SkillStatus,
+    SourceEnsured,
+    SourceListResult,
+    SourceStatus,
+    SourceUpdateResult,
+    SyncResult,
+)
 from skill_manager.sources import SourceError
-
-# ── result types ──────────────────────────────────────────────────────────────
-
-
-@dataclass(frozen=True)
-class SourceEnsured:
-    repo: str
-    commit: str
-    action: str | None = None  # updated | up_to_date | cloned
-    old_commit: str | None = None  # set when action == "updated"
-
-    def to_data(self) -> dict[str, Any]:
-        data: dict[str, Any] = {"repo": self.repo, "commit": self.commit}
-        if self.action is not None:
-            data["action"] = self.action
-        if self.action == "updated":
-            data["old_commit"] = self.old_commit
-            data["new_commit"] = self.commit
-        return data
-
-
-@dataclass(frozen=True)
-class LinkDone:
-    name: str
-    action: str  # created | exists | skipped
-
-
-@dataclass
-class SyncResult:
-    sources: list[SourceEnsured] = field(default_factory=list)
-    links: list[LinkDone] = field(default_factory=list)
-
-    def to_data(self) -> dict[str, Any]:
-        return {
-            "sources": [s.to_data() for s in self.sources],
-            "links": [{"name": link.name, "action": link.action} for link in self.links],
-        }
-
-
-@dataclass(frozen=True)
-class SkillStatus:
-    name: str
-    repo: str
-    path: str
-    link: str  # linked | broken | external | unlinked
-    # None = omit key (global scope); bool = project-scope cross-hint.
-    enabled_globally: bool | None = None
-    # True when the same name is enabled globally from a *different* source.
-    global_conflict: bool = False
-
-
-@dataclass
-class ListResult:
-    skills: list[SkillStatus]
-    # Human-only extras (not serialized to JSON data):
-    source_rows: list[tuple[str, str, str]] = field(default_factory=list)
-    # (repo, head8_or_dash, "cached"|"missing")
-    # Soft warnings for the JSON/human envelope (e.g. unreadable global declaration).
-    warnings: list[dict[str, str]] = field(default_factory=list)
-
-
-@dataclass(frozen=True)
-class EnableOutcome:
-    action: str  # enabled | already_enabled
-    skill: dict[str, str]
-    # None = omit key (global scope); bool = project-scope cross-hint.
-    enabled_globally: bool | None = None
-
-    def to_data(self) -> dict[str, Any]:
-        data: dict[str, Any] = {"action": self.action, "skill": self.skill}
-        if self.enabled_globally is not None:
-            data["enabled_globally"] = self.enabled_globally
-        return data
-
-
-@dataclass(frozen=True)
-class DisableOutcome:
-    action: str  # disabled | not_enabled
-    skill: dict[str, str]
-    link_removed: bool | None = None
-
-    def to_data(self) -> dict[str, Any]:
-        data: dict[str, Any] = {"action": self.action, "skill": self.skill}
-        if self.link_removed is not None:
-            data["link_removed"] = self.link_removed
-        return data
-
-
-@dataclass
-class EnableResult:
-    outcomes: list[EnableOutcome] = field(default_factory=list)
-    sync: SyncResult | None = None
-    warnings: list[dict[str, str]] = field(default_factory=list)
-
-    def to_data(self) -> dict[str, Any]:
-        data: dict[str, Any] = {"results": [o.to_data() for o in self.outcomes]}
-        if self.sync is not None:
-            data["sync"] = self.sync.to_data()
-        return data
-
-
-@dataclass
-class DisableResult:
-    outcomes: list[DisableOutcome] = field(default_factory=list)
-
-    def to_data(self) -> dict[str, Any]:
-        return {"results": [o.to_data() for o in self.outcomes]}
-
-
-@dataclass
-class AvailableSkillsResult:
-    skills: list[dict[str, str]]  # {name, repo, path}
-
-    def to_data(self) -> dict[str, Any]:
-        return {"skills": self.skills}
-
-
-@dataclass(frozen=True)
-class DoctorProblem:
-    code: str
-    scope: str  # project | global | config | cache | cross-scope
-    message: str
-    fix: str
-    name: str | None = None
-    repo: str | None = None
-    path: str | None = None
-
-    def to_data(self) -> dict[str, Any]:
-        data: dict[str, Any] = {
-            "code": self.code,
-            "scope": self.scope,
-            "message": self.message,
-            "fix": self.fix,
-        }
-        if self.name is not None:
-            data["name"] = self.name
-        if self.repo is not None:
-            data["repo"] = self.repo
-        if self.path is not None:
-            data["path"] = self.path
-        return data
-
-
-@dataclass
-class DoctorResult:
-    problems: list[DoctorProblem]
-
-    def to_data(self) -> dict[str, Any]:
-        return {"problems": [p.to_data() for p in self.problems]}
-
 
 # ── errors raised inside run_* for command-layer mapping ──────────────────────
 
@@ -201,20 +71,20 @@ class ScannedSkill:
     description: str
 
 
-# ── JSON-aware Typer group (usage errors become JSON when --json is set) ──────
+# ── two-track Typer group (non-TTY stdout ⇒ JSON, usage errors included) ──────
 
 
-_ROOT_HOISTABLE = ("--global", "--json")
+_ROOT_HOISTABLE = ("--global",)
 
 
 def _normalize_argv(argv: list[str]) -> list[str]:
     """Hoist root-only bool flags that appear after the subcommand token.
 
-    ``--global`` and ``--json`` are root options, so ``sync --global`` and
-    ``list --json`` would otherwise fail with "No such option". Move every
-    occurrence found before the ``--`` separator ahead of the subcommand,
-    preserving the relative order of the moved tokens; everything else
-    (including all tokens after ``--``) stays exactly where it was.
+    ``--global`` is a root option, so ``sync --global`` would otherwise fail
+    with "No such option". Move every occurrence found before the ``--``
+    separator ahead of the subcommand, preserving the relative order of the
+    moved tokens; everything else (including all tokens after ``--``) stays
+    exactly where it was.
     """
     hoisted: list[str] = []
     rest: list[str] = []
@@ -230,53 +100,37 @@ def _normalize_argv(argv: list[str]) -> list[str]:
     return [*hoisted, *rest]
 
 
-def _root_json_requested(argv: list[str]) -> bool:
-    """True only when ``--json`` appears among root options (before the subcommand).
-
-    Called on already-normalized argv, so any ``--json`` before the ``--``
-    separator has been hoisted ahead of the subcommand by ``_normalize_argv``.
-    """
-    for arg in argv:
-        if arg == "--":
-            return False
-        if arg == "--json":
-            return True
-        if arg.startswith("-"):
-            # Other root flags (--version, --help, ...); keep scanning.
-            continue
-        # First non-option token is the subcommand (or a bare arg).
-        return False
-    return False
-
-
 class SkillManagerGroup(TyperGroup):
-    """Typer group that emits JSON usage errors when ``--json`` is on argv."""
+    """Typer group whose own errors follow the track stdout selects.
+
+    A usage error on a non-TTY stdout must be the same single JSON object as
+    every other failure, so parsing it never needs a second, ASCII-text
+    aware reader. ``--help`` / ``--version`` / ``--show-completion`` stay
+    click-native in both tracks: they are CLI metadata, not command data.
+    """
 
     def main(self, args: list[str] | None = None, standalone_mode: bool = True, **kwargs: Any):
         argv = list(args) if args is not None else sys.argv[1:]
-        # Hoist --global/--json found after the subcommand so both orders parse.
+        # Hoist --global found after the subcommand so both orders parse.
         normalized = _normalize_argv(argv)
-        want_json = _root_json_requested(normalized)
-        if not (want_json and standalone_mode):
+        if not (standalone_mode and not render.is_tty()):
             return super().main(args=normalized, standalone_mode=standalone_mode, **kwargs)
         try:
-            # standalone_mode=False: click turns Exit into a returned int exit code
-            # (does not raise), and propagates ClickException for us to format.
+            # standalone_mode=False: click turns Exit into a returned int exit
+            # code (does not raise) and propagates ClickException for us.
             result = super().main(args=normalized, standalone_mode=False, **kwargs)
         except click.ClickException as e:
-            click.echo(
-                json.dumps(
-                    {
-                        "ok": False,
-                        "error": {
-                            "code": "usage_error",
-                            "message": e.format_message(),
-                        },
-                    },
-                    ensure_ascii=False,
-                )
+            _emit_json(
+                {
+                    "ok": False,
+                    "error": {"code": "usage_error", "message": e.format_message()},
+                }
             )
             raise SystemExit(e.exit_code) from e
+        except click.Abort as e:
+            # Ctrl-C is never data: keep it out of stdout entirely.
+            click.echo("Aborted!", err=True)
+            raise SystemExit(1) from e
         if isinstance(result, int):
             raise SystemExit(result)
         return result
@@ -295,84 +149,31 @@ source_app = typer.Typer(
 )
 app.add_typer(source_app, name="source")
 
+# ── track helpers ─────────────────────────────────────────────────────────────
 
-# ── rendering helpers ─────────────────────────────────────────────────────────
 
-
-def _is_json(ctx: typer.Context) -> bool:
+def _json_track(ctx: typer.Context) -> bool:
+    """True when this invocation writes the JSON track (see ``render.is_tty``)."""
     return bool(ctx.obj and ctx.obj.get("json"))
 
 
-# ANSI foreground codes for human output, sharing the picker's palette
-# (cyan/green family). Progress lines never use these — only status words,
-# Error:/Warning: prefixes, and similar eye-stopping information.
-_ANSI_CODES: dict[str, str] = {
-    "green": "32",
-    "red": "31",
-    "yellow": "33",
-    "cyan": "36",
-}
-
-# Single actionable status word per list row -> color kind.
-_STATUS_COLORS: dict[str, str] = {
-    "linked": "green",
-    "broken": "red",
-    "external": "yellow",
-    "unlinked": "yellow",
-}
+def _error_console() -> Console:
+    """Console for human warnings and errors: always the error stream."""
+    return render.make_console(stderr=True)
 
 
-def _color_enabled(*, stream: Any | None = None) -> bool:
-    """True when human output should carry ANSI colors.
-
-    Follows the no-color.org convention: ``NO_COLOR`` present and non-empty
-    (regardless of its value) disables color; an empty ``NO_COLOR`` does not.
-    Otherwise the destination stream must be a TTY — piped/redirected output
-    and CliRunner captures are never colored.
-    """
-    if os.environ.get("NO_COLOR"):
-        return False
-    stream = sys.stdout if stream is None else stream
-    try:
-        return bool(stream.isatty())
-    except (AttributeError, OSError, ValueError):
-        return False
+def _human_console(ctx: typer.Context) -> Console | None:
+    """Console for the human track, or ``None`` when this run writes JSON."""
+    return None if _json_track(ctx) else render.make_console()
 
 
-def _color(text: str, kind: str | None, *, stream: Any | None = None) -> str:
-    """Wrap ``text`` in the ANSI color for ``kind`` when color is enabled.
-
-    Unknown kinds render plain; JSON output paths never call this. When
-    color is off the text is returned unchanged, so call sites can build
-    the string unconditionally.
-    """
-    code = _ANSI_CODES.get(kind) if kind else None
-    if code is None or not _color_enabled(stream=stream):
-        return text
-    return f"\x1b[{code}m{text}\x1b[0m"
-
-
-def _display_path(path: Path) -> str:
-    """Render a filesystem path for human output, shortest stable form.
-
-    Prefers a path relative to the current working directory
-    (``.skill-manager.json``, ``.agents/skills/read``), then ``~``
-    abbreviation under the home directory (``~/.skill-manager.json``), and
-    falls back to the absolute path. The path is shown as given — a symlink
-    displays as the link itself, never resolved to its target. Purely
-    cosmetic: JSON output never uses it and error-message paths are not
-    rewritten.
-    """
-    cwd = Path.cwd()
-    try:
-        return str(path.relative_to(cwd))
-    except ValueError:
-        pass
-    home = Path.home()
-    try:
-        return f"~/{path.relative_to(home)}"
-    except ValueError:
-        return str(path)
+def _cancelled_exit(ctx: typer.Context) -> None:
+    """Interactive cancel: exit 1, still one JSON object on the JSON track."""
+    if _json_track(ctx):
+        _emit_json({"ok": False, "error": {"code": "cancelled", "message": "Cancelled."}})
+    else:
+        render.render_note(_error_console(), "Cancelled.")
+    raise typer.Exit(1) from None
 
 
 def _scope_paths(ctx: typer.Context) -> tuple[Path, Path]:
@@ -449,7 +250,8 @@ def _load_declarations_for_list_sync(path: Path) -> config.SkillDeclarations:
 
 
 def _emit_json(payload: dict[str, Any]) -> None:
-    typer.echo(json.dumps(payload, ensure_ascii=False))
+    """Write one compact JSON object to stdout — the whole JSON track."""
+    typer.echo(json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
 
 
 def _success(
@@ -458,19 +260,25 @@ def _success(
     *,
     warnings: list[dict[str, str]] | None = None,
 ) -> None:
-    if _is_json(ctx):
-        payload: dict[str, Any] = {"ok": True, "data": data}
-        if warnings:
-            payload["warnings"] = warnings
-        _emit_json(payload)
+    if not _json_track(ctx):
+        return
+    payload: dict[str, Any] = {"ok": True, "data": data}
+    if warnings:
+        payload["warnings"] = warnings
+    _emit_json(payload)
 
 
 def _fail(ctx: typer.Context, code: str, message: str, exit_code: int = 1) -> None:
-    if _is_json(ctx):
+    if _json_track(ctx):
         _emit_json({"ok": False, "error": {"code": code, "message": message}})
     else:
-        typer.echo(f"{_color('Error:', 'red', stream=sys.stderr)} {message}", err=True)
+        render.render_error(_error_console(), message)
     raise typer.Exit(exit_code)
+
+
+def _warn(message: str) -> None:
+    """Human-track soft warning on stderr (the JSON track carries them in data)."""
+    render.render_warning(_error_console(), message)
 
 
 def _error_code(exc: Exception) -> str:
@@ -514,13 +322,6 @@ def _root(
             is_eager=True,
         ),
     ] = False,
-    json_mode: Annotated[
-        bool,
-        typer.Option(
-            "--json",
-            help="Emit a single JSON object on stdout (implies non-interactive).",
-        ),
-    ] = False,
     global_scope: Annotated[
         bool,
         typer.Option(
@@ -531,11 +332,22 @@ def _root(
 ) -> None:
     """Project-scoped declarative skill manager for agent skills."""
     ctx.ensure_object(dict)
-    ctx.obj["json"] = json_mode
+    # stdout decides the track: a TTY gets Human output, anything else JSON.
+    ctx.obj["json"] = not render.is_tty()
     ctx.obj["global"] = global_scope
 
 
 # ── domain runners ────────────────────────────────────────────────────────────
+
+
+def _progress_start(progress: ProgressSink | None, text: str) -> None:
+    if progress is not None:
+        progress.start(text)
+
+
+def _progress_done(progress: ProgressSink | None, text: str) -> None:
+    if progress is not None:
+        progress.done(text)
 
 
 def run_sync(
@@ -545,54 +357,57 @@ def run_sync(
     skills_dir: Path,
     *,
     url_resolver: Callable[[str], str] | None = None,
-    emit: Callable[[str], None] | None = None,
+    progress: ProgressSink | None = None,
+    result: SyncResult | None = None,
 ) -> SyncResult:
     """Orchestrate sync: pull (or clone) every declared source, link skills.
 
     Sync is the only command that updates already cached content: each repo is
-    pulled with ``--ff-only``; a missing cache is cloned instead. A start line
-    (``pulling <repo>...``) is emitted before every pull and a result line
-    (``pulled <old8> → <new8>`` / ``up-to-date <head8>``) after.
+    pulled with ``--ff-only``; a missing cache is cloned instead. Every
+    operation reports one ``progress.start`` / ``progress.done`` pair; the
+    permanent per-operation line is rendered from the returned ``SyncResult``
+    (the human track) or not at all (the JSON track passes ``None``).
 
     ``url_resolver`` defaults to ``sources.repo_url`` (GitHub HTTPS); tests pass
     a ``file://`` resolver to use local repos as offline GitHub stand-ins.
-
-    When ``emit`` is provided, human-readable progress lines are streamed.
-    Always returns a ``SyncResult`` for structured consumers.
+    Callers that want to see work done before a failure may pass their own
+    ``result``: it is filled as the sync progresses, so a raised error leaves
+    the finished operations behind.
     """
     resolver = url_resolver or sources.repo_url
     proj = _load_declarations_for_list_sync(project_config)
     repos = config.derived_sources(proj)
     global_cfg = config.load_global_config(global_config_path)
-    result = SyncResult()
+    if result is None:
+        result = SyncResult()
     for repo in repos:
         if (cache_root / repo).is_dir():
-            if emit is not None:
-                emit(f"pulling {repo}...")
+            _progress_start(progress, f"pulling {repo}...")
             old, new = sources.pull_source(repo, global_cfg, cache_root)
             if old != new:
                 result.sources.append(
                     SourceEnsured(repo=repo, commit=new, action="updated", old_commit=old)
                 )
-                if emit is not None:
-                    emit(f"pulled {repo} ({old[:8]} → {new[:8]})")
+                _progress_done(progress, f"pulled {repo} ({old[:8]} → {new[:8]})")
             else:
                 result.sources.append(SourceEnsured(repo=repo, commit=new, action="up_to_date"))
-                if emit is not None:
-                    emit(f"up-to-date {repo} ({new[:8]})")
+                _progress_done(progress, f"up-to-date {repo} ({new[:8]})")
         else:
-            if emit is not None:
-                emit(f"cloning {repo}...")
+            _progress_start(progress, f"cloning {repo}...")
             head = sources.clone_source(repo, global_cfg, cache_root, url=resolver(repo))
             result.sources.append(SourceEnsured(repo=repo, commit=head, action="cloned"))
-            if emit is not None:
-                emit(f"cloned {repo} ({head[:8]})")
+            _progress_done(progress, f"cloned {repo} ({head[:8]})")
     config.save_global_config(global_config_path, global_cfg)
     for skill in proj.skills:
+        _progress_start(progress, f"linking {skill.name}...")
         link_result = links.ensure_link(skill, cache_root, skills_dir)
-        result.links.append(LinkDone(name=skill.name, action=link_result.action))
-        if emit is not None:
-            emit(f"{link_result.action} {skill.name} -> {_display_path(link_result.target)}")
+        result.links.append(
+            LinkDone(name=skill.name, action=link_result.action, target=link_result.target)
+        )
+        _progress_done(
+            progress,
+            f"{link_result.action} {skill.name} -> {render.display_path(link_result.target)}",
+        )
     return result
 
 
@@ -1211,7 +1026,7 @@ def run_enable(
     names: list[str] | None = None,
     include_all: bool = False,
     url_resolver: Callable[[str], str] | None = None,
-    emit: Callable[[str], None] | None = None,
+    progress: ProgressSink | None = None,
     picker: Picker | None = None,
 ) -> EnableResult:
     """Enable one or more skills interactively or non-interactively.
@@ -1241,7 +1056,7 @@ def run_enable(
             skills_dir,
             include_all=include_all,
             url_resolver=url_resolver,
-            emit=emit,
+            progress=progress,
             picker=picker,
         )
     if repo is None:
@@ -1259,7 +1074,7 @@ def run_enable(
             names=names,
             include_all=include_all,
             url_resolver=url_resolver,
-            emit=emit,
+            progress=progress,
         )
     if not names:
         raise click.exceptions.UsageError(
@@ -1275,14 +1090,8 @@ def run_enable(
         names=names,
         include_all=include_all,
         url_resolver=url_resolver,
-        emit=emit,
+        progress=progress,
     )
-
-
-def _emit(emit: Callable[[str], None] | None, message: str) -> None:
-    """Send a human progress line when an emit callback is provided."""
-    if emit is not None:
-        emit(message)
 
 
 def _require_interactive_tty(*, command: str) -> None:
@@ -1310,7 +1119,7 @@ def _enable_interactive(
     *,
     include_all: bool,
     url_resolver: Callable[[str], str] | None,
-    emit: Callable[[str], None] | None,
+    progress: ProgressSink | None,
     picker: Picker | None,
 ) -> EnableResult:
     # Guard TTY before any cache scan (injected picker skips the check).
@@ -1346,11 +1155,7 @@ def _enable_interactive(
     proj = _load_declarations_for_enable(project_config)
     locked = {s.name for s in proj.skills}
     cross_hint = _load_global_enabled_hint(project_config)
-    global_names, warnings = _load_global_enabled_hint(project_config)
-    if warnings and emit is not None:
-        for w in warnings:
-            emit(f"{_color('Warning:', 'yellow')} {w['message']}")
-    global_set = set(global_names or {})
+    global_set = set(cross_hint[0] or {})
     skill_choices = sorted(
         [
             SkillChoice(
@@ -1383,8 +1188,7 @@ def _enable_interactive(
         resolved.append((choice.name, selected_repo, choice.path))
 
     if not resolved:
-        _emit(emit, "Nothing to enable.")
-        return EnableResult(outcomes=[], sync=None, warnings=warnings)
+        return EnableResult(outcomes=[], sync=None, warnings=cross_hint[1])
 
     return _enable_apply_batch(
         project_config,
@@ -1393,9 +1197,8 @@ def _enable_interactive(
         skills_dir,
         resolved=resolved,
         url_resolver=url_resolver,
-        emit=emit,
+        progress=progress,
         cross_hint=cross_hint,
-        emit_hint_warnings=False,
     )
 
 
@@ -1409,7 +1212,7 @@ def _enable_noninteractive(
     names: list[str],
     include_all: bool,
     url_resolver: Callable[[str], str] | None,
-    emit: Callable[[str], None] | None,
+    progress: ProgressSink | None,
 ) -> EnableResult:
     """Resolve and validate a batch of enable requests, then apply it.
 
@@ -1479,9 +1282,9 @@ def _enable_noninteractive(
             # disk and saves again (idempotent, harmless).
             global_cfg = config.load_global_config(global_config_path)
             resolver = url_resolver or sources.repo_url
-            _emit(emit, f"cloning {repo}...")
+            _progress_start(progress, f"cloning {repo}...")
             head = sources.clone_source(repo, global_cfg, cache_root, url=resolver(repo))
-            _emit(emit, f"cloned {repo} ({head[:8]})")
+            _progress_done(progress, f"cloned {repo} ({head[:8]})")
             config.save_global_config(global_config_path, global_cfg)
             cloned_repos.add(repo)
             repo_dir = cache_root / repo
@@ -1571,7 +1374,7 @@ def _enable_noninteractive(
         skills_dir,
         resolved=resolved,
         url_resolver=url_resolver,
-        emit=emit,
+        progress=progress,
         cloned_repos=cloned_repos,
     )
 
@@ -1584,9 +1387,8 @@ def _enable_apply_batch(
     *,
     resolved: list[tuple[str, str, str]],
     url_resolver: Callable[[str], str] | None,
-    emit: Callable[[str], None] | None,
+    progress: ProgressSink | None,
     cross_hint: tuple[dict[str, tuple[str, str]] | None, list[dict[str, str]]] | None = None,
-    emit_hint_warnings: bool = True,
     cloned_repos: set[str] | None = None,
 ) -> EnableResult:
     """Commit a validated, deduped batch of ``(name, repo, path)`` skills.
@@ -1601,7 +1403,8 @@ def _enable_apply_batch(
     and source update update cached content) and the new skills are linked.
 
     ``cross_hint`` is the optional preloaded ``_load_global_enabled_hint`` result
-    so interactive enable can reuse one load for picker rows and apply.
+    so interactive enable can reuse one load for picker rows and apply; the
+    warnings it carries are returned in the result for the command to display.
     """
     proj = _load_declarations_for_enable(project_config)
     enabled = {s.name: s for s in proj.skills}
@@ -1614,9 +1417,6 @@ def _enable_apply_batch(
     # forward (global) semantics and are omitted in global scope.
     project_hint = _load_project_hint(project_config)
     other_scope = project_hint if global_scope else global_hint
-    if emit_hint_warnings and warnings and emit is not None:
-        for w in warnings:
-            emit(f"{_color('Warning:', 'yellow')} {w['message']}")
 
     # Validation pass — atomic: every failure aborts before any write. Also
     # dedupes the batch: a name accepted once (recorded in ``batch_added``)
@@ -1675,40 +1475,22 @@ def _enable_apply_batch(
         hint = (skill_name in global_hint) if global_hint is not None else None
         existing = enabled.get(skill_name)
         if existing is not None:
-            _emit(emit, f"Skill {skill_name!r} already enabled")
-            if hint:
-                if g[0] == existing.repo:
-                    _emit(
-                        emit,
-                        f"Skill {skill_name!r} also enabled globally (same source) — no conflict",
-                    )
-                else:
-                    _emit(
-                        emit,
-                        f"{_color('Warning:', 'yellow')} Skill {skill_name!r} conflicts with "
-                        f"the other scope's declaration ({g[0]}:{g[1]}) — different source",
-                    )
+            # A pre-existing overlap: same source is benign (⊕), a different
+            # source is a cross-scope conflict (⚠) validation cannot reject
+            # because it was declared before this run.
+            conflict = bool(hint and g is not None and g[0] != existing.repo)
             outcomes.append(
                 EnableOutcome(
                     action="already_enabled",
                     skill={"name": existing.name, "repo": existing.repo, "path": existing.path},
                     enabled_globally=hint,
+                    global_conflict=conflict,
                 )
             )
             continue
         skill_ref = SkillRef(name=skill_name, repo=skill_repo, path=skill_path)
         proj.skills.append(skill_ref)
         added_refs.append(skill_ref)
-        _emit(
-            emit,
-            f"Added {skill_name} ({skill_repo}:{skill_path}) to {_display_path(project_config)}",
-        )
-        if hint:
-            # Validation guarantees the overlap is same-source at this point.
-            _emit(
-                emit,
-                f"Skill {skill_name!r} also enabled globally (same source) — no conflict",
-            )
         outcomes.append(
             EnableOutcome(
                 action="enabled",
@@ -1728,11 +1510,15 @@ def _enable_apply_batch(
             if skill_ref.repo in seen_repos:
                 continue
             seen_repos.add(skill_ref.repo)
-            # "cloned" reports an actual cache fill by this run (clone_source
-            # never pulls, so a source not in cloned_repos was already cached).
+            # Never pulls: clone_source is a no-op for a cached source, so the
+            # live line only appears when this run actually fills the cache.
+            _progress_start(progress, f"preparing source {skill_ref.repo}...")
             head = sources.clone_source(
                 skill_ref.repo, global_cfg, cache_root, url=resolver(skill_ref.repo)
             )
+            _progress_done(progress, f"prepared source {skill_ref.repo} ({head[:8]})")
+            # "cloned" reports an actual cache fill by this run (clone_source
+            # never pulls, so a source not in cloned_repos was already cached).
             action = "cloned" if (cloned_repos and skill_ref.repo in cloned_repos) else "up_to_date"
             ensured_sources.append(
                 SourceEnsured(
@@ -1744,11 +1530,15 @@ def _enable_apply_batch(
         config.save_global_config(global_config_path, global_cfg)
         sync_result = SyncResult(sources=ensured_sources)
         for skill_ref in added_refs:
+            _progress_start(progress, f"linking {skill_ref.name}...")
             link_result = links.ensure_link(skill_ref, cache_root, skills_dir)
-            sync_result.links.append(LinkDone(name=skill_ref.name, action=link_result.action))
-            _emit(
-                emit,
-                f"{link_result.action} {skill_ref.name} -> {_display_path(link_result.target)}",
+            sync_result.links.append(
+                LinkDone(name=skill_ref.name, action=link_result.action, target=link_result.target)
+            )
+            _progress_done(
+                progress,
+                f"{link_result.action} {skill_ref.name} -> "
+                f"{render.display_path(link_result.target)}",
             )
     return EnableResult(outcomes=outcomes, sync=sync_result, warnings=warnings)
 
@@ -1760,7 +1550,7 @@ def run_disable(
     skills_dir: Path,
     *,
     names: list[str] | None = None,
-    emit: Callable[[str], None] | None = None,
+    progress: ProgressSink | None = None,
     picker: Picker | None = None,
 ) -> DisableResult:
     """Disable one or more skills (interactive when ``names`` is empty).
@@ -1781,22 +1571,20 @@ def run_disable(
 
     if not names:
         if not proj.skills:
-            _emit(emit, "No enabled skills to disable.")
             return DisableResult(outcomes=[])
         ui = _resolve_picker(picker, command="disable")
         ordered_names = ui.select_skills_to_disable(sorted(s.name for s in proj.skills))
         if not ordered_names:
-            _emit(emit, "Nothing to disable.")
             return DisableResult(outcomes=[])
         by_name = {s.name: s for s in proj.skills}
         return _disable_apply_batch(
-            project_config, cache_root, skills_dir, proj, ordered_names, by_name, emit=emit
+            project_config, cache_root, skills_dir, proj, ordered_names, by_name, progress=progress
         )
 
     by_name = {s.name: s for s in proj.skills}
     ordered_names = list(dict.fromkeys(names))
     return _disable_apply_batch(
-        project_config, cache_root, skills_dir, proj, ordered_names, by_name, emit=emit
+        project_config, cache_root, skills_dir, proj, ordered_names, by_name, progress=progress
     )
 
 
@@ -1808,7 +1596,7 @@ def _disable_apply_batch(
     ordered_names: list[str],
     by_name: dict[str, SkillRef],
     *,
-    emit: Callable[[str], None] | None,
+    progress: ProgressSink | None,
 ) -> DisableResult:
     """Disable the given names in order; report each as disabled or not_enabled.
 
@@ -1819,16 +1607,15 @@ def _disable_apply_batch(
     for name in ordered_names:
         skill = by_name.get(name)
         if skill is None:
-            _emit(emit, f"Skill {name!r} not enabled")
             outcomes.append(DisableOutcome(action="not_enabled", skill={"name": name}))
             continue
-        _emit(emit, f"Removed {skill.name} from {_display_path(project_config)}")
-        link_removed = _clean_link(cache_root, skills_dir, skill, emit)
+        link_removed, link_note = _clean_link(cache_root, skills_dir, skill, progress)
         outcomes.append(
             DisableOutcome(
                 action="disabled",
                 skill={"name": skill.name, "repo": skill.repo, "path": skill.path},
                 link_removed=link_removed,
+                link_note=link_note,
             )
         )
         disabled_names.add(name)
@@ -1842,27 +1629,29 @@ def _clean_link(
     cache_root: Path,
     skills_dir: Path,
     skill: SkillRef,
-    emit: Callable[[str], None] | None,
-) -> bool:
+    progress: ProgressSink | None,
+) -> tuple[bool, str]:
     """Remove the managed symlink for ``skill`` if it points at the cached source.
 
-    Returns True when a link was removed. External symlinks and non-symlink
-    entries are left untouched (reported, not an error).
+    Returns ``(removed, note)``: whether a link was removed, plus the human
+    detail — the link path stays visible even when the entry is left alone, so
+    a skipped cleanup never hides which link it skipped. External symlinks and
+    non-symlink entries are left untouched (reported, not an error).
     """
     link = skills_dir / skill.name
     target_path = (cache_root / skill.repo / skill.path).resolve()
+    _progress_start(progress, f"removing link {skill.name}...")
     if link.is_symlink() and links.link_points_to(link, target_path):
         link.unlink()
-        _emit(emit, f"Removed symlink {_display_path(link)}")
-        return True
-    if link.is_symlink():
-        _emit(
-            emit,
-            f"Skipped {_display_path(link)}: points elsewhere (not managed by skill-manager)",
-        )
+        removed, note = True, f"removed {render.display_path(link)}"
+    elif link.is_symlink():
+        removed, note = False, f"kept {render.display_path(link)} (points elsewhere)"
     elif link.exists():
-        _emit(emit, f"Skipped {_display_path(link)}: not a symlink")
-    return False
+        removed, note = False, f"kept {render.display_path(link)} (not a symlink)"
+    else:
+        removed, note = False, ""
+    _progress_done(progress, note or f"no link for {skill.name}")
+    return removed, note
 
 
 def run_available_skills(
@@ -1899,20 +1688,28 @@ def run_available_skills(
 @app.command()
 def sync(ctx: typer.Context) -> None:
     """Sync declared skills into the scope's .agents/skills/ dir."""
+    partial = SyncResult()
+    console: Console | None = None
     try:
-        emit = None if _is_json(ctx) else typer.echo
+        console = _human_console(ctx)
         decl_path, skills_dir = _scope_paths(ctx)
         result = run_sync(
             decl_path,
             paths.config_file(),
             paths.repos_cache_dir(),
             skills_dir,
-            emit=emit,
+            result=partial,
+            progress=None if console is None else render.Progress(console),
         )
-        if not _is_json(ctx) and not result.sources and not result.links:
-            typer.echo("Nothing to sync.")
-        _success(ctx, result.to_data())
+        if console is None:
+            _success(ctx, result.to_data())
+            return
+        render.render_sync(console, result)
     except (ConfigError, SourceError, LinkError, NotFoundError, UsageError) as e:
+        # A sync that dies half way still reports what it finished: the human
+        # track keeps the result lines for operations already done.
+        if console is not None and (partial.sources or partial.links):
+            render.render_sync(console, partial)
         _handle_command_error(ctx, e)
 
 
@@ -1920,6 +1717,7 @@ def sync(ctx: typer.Context) -> None:
 def list_(ctx: typer.Context) -> None:
     """List declared sources and skills with status."""
     try:
+        console = _human_console(ctx)
         decl_path, skills_dir = _scope_paths(ctx)
         result = run_list(
             decl_path,
@@ -1927,109 +1725,21 @@ def list_(ctx: typer.Context) -> None:
             paths.repos_cache_dir(),
             skills_dir,
         )
-        if _is_json(ctx):
-            skills_payload: list[dict[str, Any]] = []
-            for s in result.skills:
-                row: dict[str, Any] = {
-                    "name": s.name,
-                    "repo": s.repo,
-                    "path": s.path,
-                    "link": s.link,
-                }
-                if s.enabled_globally is not None:
-                    row["enabled_globally"] = s.enabled_globally
-                if s.global_conflict:
-                    row["global_conflict"] = True
-                skills_payload.append(row)
-            _success(ctx, {"skills": skills_payload}, warnings=result.warnings or None)
-        else:
-            for w in result.warnings:
-                typer.echo(
-                    f"{_color('Warning:', 'yellow', stream=sys.stderr)} {w['message']}",
-                    err=True,
-                )
-            if not result.skills and not result.source_rows:
-                typer.echo(
-                    "No skills enabled yet. Try 'skill-manager enable' or "
-                    "'skill-manager source available-skills' to discover and enable skills."
-                )
-                return
-            typer.echo("Sources:")
-            for repo, head, status in result.source_rows:
-                typer.echo(f"  {repo}  {head}  {status}")
-            typer.echo("Skills:")
-            # Legend + name-column pad only when a row carries a mark (⊕/⚠).
-            show_global_legend = any(
-                s.enabled_globally and not s.global_conflict for s in result.skills
-            )
-            has_marks = show_global_legend or any(s.global_conflict for s in result.skills)
-            if show_global_legend:
-                typer.echo("  (⊕ = also enabled globally, same source)")
-            for s in result.skills:
-                # One actionable status word per row: linked (normal), unlinked/
-                # broken (fixable via sync), external (points elsewhere).
-                # ⚠ (cross-scope conflict) and ⊕ (benign same-source overlap)
-                # are mutually exclusive per row; pads keep columns aligned.
-                if s.global_conflict:
-                    name_cell = f"⚠ {s.name}"
-                elif s.enabled_globally:
-                    name_cell = f"⊕ {s.name}"
-                elif has_marks:
-                    name_cell = f"  {s.name}"
-                else:
-                    name_cell = s.name
-                typer.echo(
-                    f"  {name_cell}  {s.repo}:{s.path}  "
-                    f"{_color(s.link, _STATUS_COLORS.get(s.link))}"
-                )
+        if console is None:
+            _success(ctx, result.to_data(), warnings=result.warnings or None)
+            return
+        for warning in result.warnings:
+            _warn(warning["message"])
+        render.render_list(console, result)
     except (ConfigError, SourceError, LinkError, NotFoundError, UsageError) as e:
         _handle_command_error(ctx, e)
-
-
-# ── doctor command ───────────────────────────────────────────────────────────
-
-
-_DOCTOR_CATEGORIES: list[tuple[str, frozenset[str]]] = [
-    ("Config", frozenset({"declaration_parse_error", "global_config_parse_error"})),
-    (
-        "Source",
-        frozenset(
-            {
-                "declared_source_not_registered",
-                "registered_source_cache_missing",
-                "orphan_source_registered",
-                "orphan_source_cache",
-                "head_drift",
-                "declared_path_invalid",
-            }
-        ),
-    ),
-    ("Link", frozenset({"unlinked", "broken_link", "external_link", "orphan_link"})),
-    ("Conflict", frozenset({"cross_scope_conflict"})),
-    ("Cache", frozenset({"cache_detached_head", "cache_dirty"})),
-    ("Environment", frozenset({"xdg_path_issue", "cache_dir_not_writable"})),
-]
-
-
-def _render_doctor_text(result: DoctorResult) -> None:
-    """Render doctor problems grouped by category for human output."""
-    if not result.problems:
-        typer.echo("No problems found.")
-        return
-    for category, codes in _DOCTOR_CATEGORIES:
-        cat_problems = [p for p in result.problems if p.code in codes]
-        if not cat_problems:
-            continue
-        typer.echo(f"{category}:")
-        for p in cat_problems:
-            typer.echo(f"  {p.code}: {p.message}")
-            typer.echo(f"    -> fix: {p.fix}")
 
 
 @app.command()
 def doctor(ctx: typer.Context) -> None:
     """Diagnose consistency issues across all scopes and infrastructure."""
     try:
+        console = _human_console(ctx)
         if ctx.obj and ctx.obj.get("global"):
             raise UsageError("doctor is a panoramic command and does not accept --global")
         result = run_doctor(
@@ -2040,10 +1750,10 @@ def doctor(ctx: typer.Context) -> None:
             paths.project_skills_dir(),
             paths.global_skills_dir(),
         )
-        if _is_json(ctx):
+        if console is None:
             _success(ctx, result.to_data())
-        else:
-            _render_doctor_text(result)
+            return
+        render.render_doctor(console, result)
     except (ConfigError, SourceError, LinkError, NotFoundError, UsageError) as e:
         _handle_command_error(ctx, e)
 
@@ -2066,33 +1776,26 @@ def enable(
 ) -> None:
     """Enable one or more skills from a cached repo (interactive if no args)."""
     try:
-        name_list = list(names or [])
-        interactive = repo is None and not name_list
-        if _is_json(ctx) and interactive:
-            raise click.exceptions.UsageError(
-                "enable requires REPO and NAME(s) in --json mode (non-interactive)"
-            )
-        emit = None if _is_json(ctx) else typer.echo
+        console = _human_console(ctx)
         decl_path, skills_dir = _scope_paths(ctx)
-        # Interactive path builds the default questionary picker inside the runner
-        # (after TTY check). Non-interactive never opens a TUI.
         result = run_enable(
             decl_path,
             paths.config_file(),
             paths.repos_cache_dir(),
             skills_dir,
             repo=repo,
-            names=name_list,
+            names=list(names or []),
             include_all=include_all,
-            emit=emit,
+            progress=None if console is None else render.Progress(console),
         )
-        if _is_json(ctx):
+        if console is None:
             _success(ctx, result.to_data(), warnings=result.warnings or None)
-        # Text mode: progress / status lines already streamed via emit.
+            return
+        for warning in result.warnings:
+            _warn(warning["message"])
+        render.render_enable(console, result)
     except PickerCancelled:
-        if not _is_json(ctx):
-            typer.echo("Cancelled.", err=True)
-        raise typer.Exit(1) from None
+        _cancelled_exit(ctx)
     except (ConfigError, SourceError, LinkError, NotFoundError, UsageError) as e:
         _handle_command_error(ctx, e)
 
@@ -2107,28 +1810,22 @@ def disable(
 ) -> None:
     """Disable one or more enabled skills (interactive if no args)."""
     try:
-        name_list = list(names or [])
-        interactive = not name_list
-        if _is_json(ctx) and interactive:
-            raise click.exceptions.UsageError(
-                "disable requires NAME(s) in --json mode (non-interactive)"
-            )
-        emit = None if _is_json(ctx) else typer.echo
+        console = _human_console(ctx)
         decl_path, skills_dir = _scope_paths(ctx)
         result = run_disable(
             decl_path,
             paths.config_file(),
             paths.repos_cache_dir(),
             skills_dir,
-            names=name_list,
-            emit=emit,
+            names=list(names or []),
+            progress=None if console is None else render.Progress(console),
         )
-        if _is_json(ctx):
+        if console is None:
             _success(ctx, result.to_data())
+            return
+        render.render_disable(console, result)
     except PickerCancelled:
-        if not _is_json(ctx):
-            typer.echo("Cancelled.", err=True)
-        raise typer.Exit(1) from None
+        _cancelled_exit(ctx)
     except (ConfigError, SourceError, LinkError, NotFoundError, UsageError) as e:
         _handle_command_error(ctx, e)
 
@@ -2140,30 +1837,24 @@ def disable(
 def source_list(ctx: typer.Context) -> None:
     """List registered source repositories with status."""
     try:
+        console = _human_console(ctx)
         global_cfg = config.load_global_config(paths.config_file())
         cache_root = paths.repos_cache_dir()
-        if _is_json(ctx):
-            data = {
-                "sources": [
-                    {
-                        "repo": repo,
-                        "commit": global_cfg.sources[repo].commit,
-                        "url": global_cfg.sources[repo].url,
-                    }
-                    for repo in sorted(global_cfg.sources)
-                ]
-            }
-            _success(ctx, data)
+        result = SourceListResult(
+            sources=[
+                SourceStatus(
+                    repo=repo,
+                    commit=global_cfg.sources[repo].commit,
+                    url=global_cfg.sources[repo].url,
+                    cached=(cache_root / repo).is_dir(),
+                )
+                for repo in sorted(global_cfg.sources)
+            ]
+        )
+        if console is None:
+            _success(ctx, result.to_data())
             return
-        if not global_cfg.sources:
-            typer.echo("No sources registered (use 'source add' first)")
-            return
-        for repo in sorted(global_cfg.sources):
-            src = global_cfg.sources[repo]
-            cached = (cache_root / repo).is_dir()
-            head = src.commit[:8] if src.commit else "-"
-            status = "cached" if cached else "missing"
-            typer.echo(f"  {repo:<20} {head:<9} {status:<8} {src.url}")
+        render.render_source_list(console, result)
     except (ConfigError, SourceError, LinkError, NotFoundError, UsageError) as e:
         _handle_command_error(ctx, e)
 
@@ -2172,29 +1863,26 @@ def source_list(ctx: typer.Context) -> None:
 def source_add(ctx: typer.Context, repo: str) -> None:
     """Add a source repository (clone to cache, register in global config)."""
     try:
+        console = _human_console(ctx)
         config.validate_repo(repo, "source add")
         global_cfg = config.load_global_config(paths.config_file())
         cache_root = paths.repos_cache_dir()
         if repo in global_cfg.sources and (cache_root / repo).is_dir():
-            src = global_cfg.sources[repo]
-            if _is_json(ctx):
-                _success(
-                    ctx,
-                    {
-                        "action": "already_exists",
-                        "repo": repo,
-                        "commit": src.commit,
-                    },
-                )
+            commit = global_cfg.sources[repo].commit
+            if console is None:
+                _success(ctx, {"action": "already_exists", "repo": repo, "commit": commit})
             else:
-                typer.echo(f"source {repo} already exists")
+                render.render_source_action(console, repo, "already exists", commit[:8], ok=False)
             return
+        progress = None if console is None else render.Progress(console)
+        _progress_start(progress, f"cloning {repo}...")
         head = sources.clone_source(repo, global_cfg, cache_root)
+        _progress_done(progress, f"cloned {repo} ({head[:8]})")
         config.save_global_config(paths.config_file(), global_cfg)
-        if _is_json(ctx):
+        if console is None:
             _success(ctx, {"action": "added", "repo": repo, "commit": head})
         else:
-            typer.echo(f"added {repo} (HEAD {head[:8]})")
+            render.render_source_action(console, repo, "added", head[:8])
     except (ConfigError, SourceError, LinkError, NotFoundError, UsageError) as e:
         _handle_command_error(ctx, e)
 
@@ -2203,25 +1891,24 @@ def source_add(ctx: typer.Context, repo: str) -> None:
 def source_remove(ctx: typer.Context, repo: str) -> None:
     """Remove a source repository (delete cache + config entry)."""
     try:
+        console = _human_console(ctx)
         config.validate_repo(repo, "source remove")
         global_cfg = config.load_global_config(paths.config_file())
         cache_root = paths.repos_cache_dir()
         if repo not in global_cfg.sources:
             raise NotFoundError(f"source {repo!r} not found")
         referenced_scopes = _referencing_scopes(repo)
-        if referenced_scopes and not _is_json(ctx):
-            typer.echo(
-                f"{_color('warning:', 'yellow', stream=sys.stderr)} {repo!r} still "
-                f"referenced by: {', '.join(referenced_scopes)} "
-                "(other projects not checked); links may break",
-                err=True,
+        if referenced_scopes and console is not None:
+            _warn(
+                f"{repo!r} still referenced by: {', '.join(referenced_scopes)} "
+                "(other projects not checked); links may break"
             )
         sources.remove_source(repo, global_cfg, cache_root)
         config.save_global_config(paths.config_file(), global_cfg)
-        if _is_json(ctx):
+        if console is None:
             _success(ctx, {"action": "removed", "repo": repo})
         else:
-            typer.echo(f"removed {repo}")
+            render.render_source_action(console, repo, "removed")
     except (ConfigError, SourceError, LinkError, NotFoundError, UsageError) as e:
         _handle_command_error(ctx, e)
 
@@ -2233,6 +1920,8 @@ def source_update(
 ) -> None:
     """Update source repository(ies) to latest (pull --ff-only)."""
     try:
+        console = _human_console(ctx)
+        progress = None if console is None else render.Progress(console)
         global_cfg = config.load_global_config(paths.config_file())
         cache_root = paths.repos_cache_dir()
         if repo is not None:
@@ -2242,42 +1931,30 @@ def source_update(
         else:
             repos = sorted(global_cfg.sources)
 
-        updates: list[dict[str, str]] = []
-        if not repos:
-            if _is_json(ctx):
-                _success(ctx, {"updates": []})
-            else:
-                typer.echo("No sources registered (use 'source add' first)")
-            return
-
+        result = SourceUpdateResult()
         for r in repos:
             if (cache_root / r).is_dir():
+                _progress_start(progress, f"pulling {r}...")
                 old, new = sources.pull_source(r, global_cfg, cache_root)
                 if old != new:
-                    updates.append(
-                        {
-                            "action": "updated",
-                            "repo": r,
-                            "commit": new,
-                            "old_commit": old,
-                            "new_commit": new,
-                        }
+                    result.updates.append(
+                        SourceEnsured(repo=r, commit=new, action="updated", old_commit=old)
                     )
-                    if not _is_json(ctx):
-                        typer.echo(f"updated {r} ({old[:8]} → {new[:8]})")
+                    _progress_done(progress, f"pulled {r} ({old[:8]} → {new[:8]})")
                 else:
-                    updates.append({"action": "up_to_date", "repo": r, "commit": new})
-                    if not _is_json(ctx):
-                        typer.echo(f"up-to-date {r} ({new[:8]})")
+                    result.updates.append(SourceEnsured(repo=r, commit=new, action="up_to_date"))
+                    _progress_done(progress, f"up-to-date {r} ({new[:8]})")
             else:
+                _progress_start(progress, f"cloning {r}...")
                 head = sources.clone_source(r, global_cfg, cache_root)
-                updates.append({"action": "cloned", "repo": r, "commit": head})
-                if not _is_json(ctx):
-                    typer.echo(f"cloned {r} ({head[:8]})")
+                result.updates.append(SourceEnsured(repo=r, commit=head, action="cloned"))
+                _progress_done(progress, f"cloned {r} ({head[:8]})")
             config.save_global_config(paths.config_file(), global_cfg)
 
-        if _is_json(ctx):
-            _success(ctx, {"updates": updates})
+        if console is None:
+            _success(ctx, result.to_data())
+            return
+        render.render_source_update(console, result)
     except (ConfigError, SourceError, LinkError, NotFoundError, UsageError) as e:
         _handle_command_error(ctx, e)
 
@@ -2299,21 +1976,12 @@ def source_available_skills(
 ) -> None:
     """List skills available in cached source repos (ignores project config)."""
     try:
+        console = _human_console(ctx)
         result = run_available_skills(paths.repos_cache_dir(), repo=repo, include_all=include_all)
-        if _is_json(ctx):
+        if console is None:
             _success(ctx, result.to_data())
             return
-        if not result.skills:
-            typer.echo("No skills found in cached sources.")
-            return
-        # Group by repo for human output; omit empty repos (already absent).
-        by_repo: dict[str, list[dict[str, str]]] = {}
-        for skill in result.skills:
-            by_repo.setdefault(skill["repo"], []).append(skill)
-        for repo_name in sorted(by_repo):
-            typer.echo(f"{repo_name}:")
-            for skill in by_repo[repo_name]:
-                typer.echo(f"  {skill['name']}  ({skill['path']})")
+        render.render_available_skills(console, result)
     except (ConfigError, SourceError, LinkError, NotFoundError, UsageError) as e:
         _handle_command_error(ctx, e)
 
