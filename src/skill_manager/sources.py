@@ -21,12 +21,23 @@ Both operations apply the set — ``clone_source`` on a fresh clone (rolling the
 clone back if it cannot be sliced, so no half-materialized cache survives a
 failure), ``pull_source`` after every pull, which slices a pre-existing full
 clone in place. The worktree is restored with git's own ``sparse-checkout
-disable``. Cone mode is requested explicitly: ``set`` neither accepted a cone
-flag nor defaulted to one before git 2.35, and a non-cone ``set`` would take the
-directories as literal patterns and materialize almost nothing. Objects outside
-the slice are fetched lazily from origin, so ``git log -p`` / ``git diff`` need
-the network and fail slowly without it; ``rev-parse``, ``status`` and
-``ls-tree`` stay offline-safe (which is all ``doctor`` and discovery use).
+disable``.
+
+The slice is applied as ``sparse-checkout set --cone --skip-checks``. Cone mode
+is what makes bare directory names work: it keeps the files of the ancestors of
+every listed directory (which is how root files land) and takes the names
+literally, escaping glob characters itself, where a non-cone ``set`` would read
+them as gitignore patterns — a directory called ``star*`` then matches something
+else, or nothing at all. Cone mode's own sanity checks reject such names as
+mistyped patterns, hence ``--skip-checks``: they come from ``ls-tree``, so they
+are directories by construction. This needs git 2.36+ (cone mode 2.35,
+``--skip-checks`` 2.36); older git fails loudly rather than materializing the
+wrong paths.
+
+Objects outside the slice are fetched lazily from origin, so ``git log -p`` /
+``git diff`` need the network and fail slowly without it; ``rev-parse``,
+``status`` and ``ls-tree`` stay offline-safe (which is all ``doctor`` and
+discovery use).
 
 All git calls use subprocess with list arguments (no shell).
 """
@@ -88,14 +99,19 @@ def _apply_materialization(dest: Path) -> None:
     """Bring ``dest``'s worktree in line with its materialization set.
 
     Cone mode is requested explicitly: ``set`` only defaults to it from git 2.35
-    on, and a non-cone ``set`` would take the directories as literal patterns and
-    silently materialize almost nothing.
+    on, and cone mode is what makes bare directory names work — it keeps the
+    files of the ancestors of every listed directory (which is how root files
+    land) and treats names literally, escaping any glob characters itself.
+
+    ``--skip-checks`` goes with it: names come straight from ``ls-tree``, so a
+    directory legitimately called ``star*`` or ``!bang`` must not be mistaken for
+    a mistyped pattern and rejected.
     """
     dirs = _materialization_dirs(dest)
     if dirs is None:
         _run_git(["sparse-checkout", "disable"], cwd=dest)
     else:
-        _run_git(["sparse-checkout", "set", "--cone", "--", *dirs], cwd=dest)
+        _run_git(["sparse-checkout", "set", "--cone", "--skip-checks", "--", *dirs], cwd=dest)
 
 
 def clone_source(

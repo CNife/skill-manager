@@ -266,6 +266,30 @@ def test_clone_source_root_skill_materializes_whole_tree(
     assert (cache / "tw93" / "Kami" / "tools" / "run.sh").is_file()
 
 
+def test_clone_source_materializes_glob_like_dir_names(tmp_path: Path, make_source_repo) -> None:
+    """Skill dirs whose names look like patterns ('[' , leading '!') still materialize.
+
+    Cone mode's sanity checks would reject those names as mistyped patterns; the
+    directories come from ``ls-tree``, so they are asserted to be directories.
+    """
+    repo = make_source_repo(
+        "waza",
+        {
+            "skills/a[b]": skill_md("bracket"),
+            "!bang": skill_md("bang"),
+            "skills/star*": skill_md("star"),
+        },
+    )
+    cache = tmp_path / "cache" / "repos"
+    clone_source("tw93/Waza", GlobalConfig(), cache, url=f"file://{repo}")
+
+    assert _skill_keys(run_available_skills(cache, repo="tw93/Waza")) == {
+        ("bracket", "skills/a[b]"),
+        ("bang", "!bang"),
+        ("star", "skills/star*"),
+    }
+
+
 def test_clone_source_materialization_failure_leaves_no_cache(
     tmp_path: Path, make_source_repo, monkeypatch: pytest.MonkeyPatch
 ) -> None:
