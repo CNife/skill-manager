@@ -25,6 +25,7 @@ name = "cnife-skill-manager"
 source = { editable = "." }
 dependencies = [
     { name = "questionary" },
+    { name = "rich" },
     { name = "typer" },
 ]
 
@@ -39,6 +40,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "questionary", specifier = ">=2.1.1" },
+    { name = "rich", specifier = ">=15" },
     { name = "typer", specifier = ">=0.12" },
 ]
 

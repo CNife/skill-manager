@@ -9,11 +9,11 @@ Coverage map (acceptance criteria):
   hits point at ``source available-skills``; arguments must be pure names.
 - scope-internal same-name hard ban (different source or different path) with
   a disable-first hint; same repo+path stays an idempotent no-op.
-- cross-scope same-name: same source is legal with a neutral hint; different
-  sources hard-error in both directions (project enable checks the global
-  declaration; ``--global`` enable checks the cwd project).
-- list renders benign overlap (⊕) and conflict (⚠) distinctly; existing
-  conflicts warn without hard-failing.
+- cross-scope same-name: same source is legal and marked enabled_globally;
+  different sources hard-error in both directions (project enable checks the
+  global declaration; --global enable checks the cwd project).
+- list reports overlap via enabled_globally/global_conflict; existing conflicts
+  carry a warning without hard-failing.
 """
 
 from __future__ import annotations
@@ -319,7 +319,7 @@ def test_enable_same_repo_same_path_idempotent(tmp_path: Path, make_source_repo)
 # ── d. cross-scope same-name ──────────────────────────────────────────────────
 
 
-def test_enable_cross_scope_same_source_succeeds_neutral_hint(
+def test_enable_cross_scope_same_source_marks_global_overlap(
     tmp_path: Path, make_source_repo
 ) -> None:
     from skill_manager import paths
@@ -332,7 +332,6 @@ def test_enable_cross_scope_same_source_succeeds_neutral_hint(
         ),
         encoding="utf-8",
     )
-    messages: list[str] = []
     result = run_enable(
         project / ".skill-manager.json",
         gconfig,
@@ -340,11 +339,10 @@ def test_enable_cross_scope_same_source_succeeds_neutral_hint(
         skills_dir,
         repo="tw93/Waza",
         names=["plugins/waza/skills/read"],
-        emit=messages.append,
     )
     assert result.outcomes[0].action == "enabled"
     assert result.outcomes[0].enabled_globally is True
-    assert any("also enabled globally (same source) — no conflict" in m for m in messages)
+    assert result.outcomes[0].global_conflict is False
 
 
 def test_enable_cross_scope_different_source_errors(tmp_path: Path, make_source_repo) -> None:
@@ -478,23 +476,14 @@ def test_list_distinguishes_benign_overlap_and_conflict(
     assert any(w["code"] == "global_conflict" for w in result.warnings)
 
 
-def test_list_human_marks_oplus_and_warning(tmp_path: Path, make_source_repo, monkeypatch) -> None:
+def test_list_json_conflict_field(tmp_path: Path, make_source_repo, monkeypatch) -> None:
     project = _conflict_env(tmp_path, make_source_repo)
     monkeypatch.chdir(project)
     result = runner.invoke(app, ["list"])
     assert result.exit_code == 0, result.output
-    out = result.stdout
-    assert "(⊕ = also enabled globally, same source)" in out
-    assert "⊕ read" in out
-    assert "⚠ write" in out
-
-
-def test_list_json_conflict_field(tmp_path: Path, make_source_repo, monkeypatch) -> None:
-    project = _conflict_env(tmp_path, make_source_repo)
-    monkeypatch.chdir(project)
-    result = runner.invoke(app, ["--json", "list"])
-    assert result.exit_code == 0, result.output
+    assert result.stderr == ""
     body = json.loads(result.stdout)
+    assert body["ok"] is True
     by_name = {s["name"]: s for s in body["data"]["skills"]}
     assert by_name["read"]["enabled_globally"] is True
     assert "global_conflict" not in by_name["read"]

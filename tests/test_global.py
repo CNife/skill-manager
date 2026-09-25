@@ -90,7 +90,7 @@ def test_global_sync_skips_foreign_entry(tmp_path: Path, make_source_repo) -> No
         paths.global_skills_config_path(),
         [{"name": "read", "repo": "tw93/Waza", "path": "skills/read"}],
     )
-    result = runner.invoke(app, ["--json", "--global", "sync"])
+    result = runner.invoke(app, ["--global", "sync"])
     assert result.exit_code == 0
     links = _parse_json(result)["data"]["links"]
     assert links[0]["name"] == "read"
@@ -110,7 +110,7 @@ def test_global_list_json(tmp_path: Path, make_source_repo) -> None:
         [{"name": "read", "repo": "tw93/Waza", "path": "skills/read"}],
     )
     runner.invoke(app, ["--global", "sync"])
-    result = runner.invoke(app, ["--json", "--global", "list"])
+    result = runner.invoke(app, ["--global", "list"])
     assert result.exit_code == 0
     body = _parse_json(result)
     assert body["ok"] is True
@@ -119,23 +119,12 @@ def test_global_list_json(tmp_path: Path, make_source_repo) -> None:
     assert skills[0]["link"] == "linked"
 
 
-def test_json_global_option_ordering(tmp_path: Path, make_source_repo) -> None:
-    """--json and --global compose in either order (both are root options)."""
-    _seed_source(tmp_path, make_source_repo)
-    _write_decls(paths.global_skills_config_path(), [])
-    r1 = runner.invoke(app, ["--json", "--global", "list"])
-    r2 = runner.invoke(app, ["--global", "--json", "list"])
-    assert r1.exit_code == 0 and r2.exit_code == 0
-    assert _parse_json(r1)["ok"] is True
-    assert _parse_json(r2)["ok"] is True
-
-
 # ── enable / disable ──────────────────────────────────────────────────────────
 
 
 def test_global_enable_noninteractive(tmp_path: Path, make_source_repo) -> None:
     _seed_source(tmp_path, make_source_repo)
-    result = runner.invoke(app, ["--json", "--global", "enable", "tw93/Waza", "read"])
+    result = runner.invoke(app, ["--global", "enable", "tw93/Waza", "read"])
     assert result.exit_code == 0, result.output
     body = _parse_json(result)
     assert body["data"]["results"][0]["action"] == "enabled"
@@ -176,8 +165,8 @@ def test_global_enable_interactive(tmp_path: Path, make_source_repo) -> None:
 
 def test_global_enable_idempotent(tmp_path: Path, make_source_repo) -> None:
     _seed_source(tmp_path, make_source_repo)
-    runner.invoke(app, ["--json", "--global", "enable", "tw93/Waza", "read"])
-    result = runner.invoke(app, ["--json", "--global", "enable", "tw93/Waza", "read"])
+    runner.invoke(app, ["--global", "enable", "tw93/Waza", "read"])
+    result = runner.invoke(app, ["--global", "enable", "tw93/Waza", "read"])
     assert result.exit_code == 0
     assert _parse_json(result)["data"]["results"][0]["action"] == "already_enabled"
     decl = load_skill_declarations(paths.global_skills_config_path())
@@ -186,8 +175,8 @@ def test_global_enable_idempotent(tmp_path: Path, make_source_repo) -> None:
 
 def test_global_disable_noninteractive(tmp_path: Path, make_source_repo) -> None:
     _seed_source(tmp_path, make_source_repo)
-    runner.invoke(app, ["--json", "--global", "enable", "tw93/Waza", "read"])
-    result = runner.invoke(app, ["--json", "--global", "disable", "read"])
+    runner.invoke(app, ["--global", "enable", "tw93/Waza", "read"])
+    result = runner.invoke(app, ["--global", "disable", "read"])
     assert result.exit_code == 0, result.output
     body = _parse_json(result)
     assert body["data"]["results"][0]["action"] == "disabled"
@@ -223,13 +212,13 @@ def test_cross_scope_independence(
     assert (proj_link / "SKILL.md").is_file()
     assert (glob_link / "SKILL.md").is_file()
 
-    proj_list = _parse_json(runner.invoke(app, ["--json", "list"]))
-    glob_list = _parse_json(runner.invoke(app, ["--json", "--global", "list"]))
+    proj_list = _parse_json(runner.invoke(app, ["list"]))
+    glob_list = _parse_json(runner.invoke(app, ["--global", "list"]))
     assert [s["name"] for s in proj_list["data"]["skills"]] == ["read"]
     assert [s["name"] for s in glob_list["data"]["skills"]] == ["read"]
 
     # disabling global must not touch the project link
-    runner.invoke(app, ["--json", "--global", "disable", "read"])
+    runner.invoke(app, ["--global", "disable", "read"])
     assert proj_link.is_symlink()
     assert not glob_link.exists()
 
@@ -252,10 +241,10 @@ def test_home_cwd_targets_global_declarations(
     assert (paths.global_skills_dir() / "read" / "SKILL.md").is_file()
 
 
-# ── source remove: dual-scope warning ─────────────────────────────────────────
+# ── source remove with dual-scope references ──────────────────────────────────
 
 
-def test_source_remove_warns_both_scopes(
+def test_source_remove_with_both_scope_refs_returns_json_success(
     tmp_path: Path, make_source_repo, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _seed_source(tmp_path, make_source_repo)
@@ -272,27 +261,11 @@ def test_source_remove_warns_both_scopes(
     monkeypatch.chdir(project)
     result = runner.invoke(app, ["source", "remove", "tw93/Waza"])
     assert result.exit_code == 0, result.output
-    assert "still referenced" in result.output
-    assert "project" in result.output
-    assert "global" in result.output
+    assert result.stderr == ""
+    body = _parse_json(result)
+    assert body == {"ok": True, "data": {"action": "removed", "repo": "tw93/Waza"}}
+    assert "warnings" not in body
     assert not (paths.repos_cache_dir() / "tw93" / "Waza").exists()
-
-
-def test_source_remove_json_no_warning(
-    tmp_path: Path, make_source_repo, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    _seed_source(tmp_path, make_source_repo)
-    project = tmp_path / "proj"
-    project.mkdir()
-    _write_decls(
-        project / ".skill-manager.json",
-        [{"name": "read", "repo": "tw93/Waza", "path": "skills/read"}],
-    )
-    monkeypatch.chdir(project)
-    result = runner.invoke(app, ["--json", "source", "remove", "tw93/Waza"])
-    assert result.exit_code == 0
-    assert "warning" not in result.output.lower()
-    assert _parse_json(result)["data"]["action"] == "removed"
 
 
 # ── --global is a no-op on source subcommands ──────────────────────────────────
@@ -302,25 +275,7 @@ def test_global_flag_ignored_on_source_subcommand(tmp_path: Path, make_source_re
     _seed_source(tmp_path, make_source_repo)
     result = runner.invoke(app, ["--global", "source", "list"])
     assert result.exit_code == 0, result.output
-    assert "tw93/Waza" in result.output
-
-
-# ── source remove from ~: no double-count ─────────────────────────────────────
-
-
-def test_source_remove_from_home_no_double_count(
-    tmp_path: Path, make_source_repo, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """From ~ the project and global declaration files coincide; warn once as global."""
-    _seed_source(tmp_path, make_source_repo)
-    _write_decls(
-        paths.global_skills_config_path(),
-        [{"name": "read", "repo": "tw93/Waza", "path": "skills/read"}],
-    )
-    monkeypatch.chdir(paths.global_skills_config_path().parent)  # cwd = HOME
-    result = runner.invoke(app, ["source", "remove", "tw93/Waza"])
-    assert result.exit_code == 0, result.output
-    assert "still referenced" in result.output
-    assert "global" in result.output
-    # the home/global declaration is one file, not double-counted as project + global
-    assert "project, global" not in result.output
+    assert result.stderr == ""
+    body = _parse_json(result)
+    assert body["ok"] is True
+    assert [source["repo"] for source in body["data"]["sources"]] == ["tw93/Waza"]

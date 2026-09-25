@@ -1,15 +1,14 @@
 """Argv normalization for root flags written after the subcommand (issue #45).
 
-``--global`` / ``--json`` are root-only options. SkillManagerGroup.main hoists
-them ahead of the subcommand token, so ``sync --global`` and ``list --json``
-behave exactly like the root-first forms. Tokens after ``--`` are never
-rewritten; other flags (``--all`` etc.) are left in place.
+The only hoistable root boolean is --global. SkillManagerGroup.main moves it
+before the subcommand, so sync --global and --global sync target the same
+scope. Tokens after -- are never rewritten; every other flag or argument
+stays in place.
 """
 
 from __future__ import annotations
 
 import json
-import re
 from pathlib import Path
 
 import pytest
@@ -30,17 +29,8 @@ def _write_decls(path: Path, skills: list[dict]) -> None:
 
 def _parse_json(result) -> dict:
     assert result.stdout.strip(), f"empty stdout; stderr={result.stderr!r} output={result.output!r}"
+    assert result.stderr == ""
     return json.loads(result.stdout)
-
-
-def _strip_ansi(text: str) -> str:
-    """Drop SGR color codes before substring assertions.
-
-    On a TTY (and under GitHub Actions, where typer forces terminal output)
-    error text is colorized: rich may split a highlighted token like
-    ``--global`` with ANSI sequences, so the raw bytes are not contiguous.
-    """
-    return re.sub(r"\x1b\[[0-9;]*m", "", text)
 
 
 def _seed_source(tmp_path: Path, make_source_repo, skills: dict[str, str] | None = None) -> str:
@@ -94,56 +84,44 @@ def test_global_flag_after_subcommand_matches_root_first(
     proj.mkdir()
     monkeypatch.chdir(proj)
 
-    root_first = runner.invoke(app, ["--global", "list", "--json"])
-    after = runner.invoke(app, ["list", "--json", "--global"])
+    root_first = runner.invoke(app, ["--global", "list"])
+    after = runner.invoke(app, ["list", "--global"])
     assert root_first.exit_code == 0, root_first.output
     assert after.exit_code == 0, after.output
     assert _parse_json(root_first) == _parse_json(after)
     assert _parse_json(after)["ok"] is True
 
 
-# ── list --json ≡ --json list ────────────────────────────────────────────────
+# ── removed JSON option is rejected ──────────────────────────────────────────
 
 
-def test_list_json_after_subcommand_matches_root_first(
-    tmp_path: Path, make_source_repo, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """``list --json`` produces the same JSON structure as ``--json list``."""
-    _seed_source(tmp_path, make_source_repo)
-    proj = tmp_path / "proj"
-    proj.mkdir()
-    _write_decls(
-        proj / ".skill-manager.json",
-        [{"name": "read", "repo": "tw93/Waza", "path": "skills/read"}],
-    )
-    monkeypatch.chdir(proj)
-
-    root_first = runner.invoke(app, ["--json", "list"])
-    after = runner.invoke(app, ["list", "--json"])
-    assert root_first.exit_code == 0, root_first.output
-    assert after.exit_code == 0, after.output
-    body = _parse_json(after)
-    assert body == _parse_json(root_first)
-    assert body["ok"] is True
-    assert {"name", "repo", "path", "link"} <= set(body["data"]["skills"][0])
-
-
-# ── want_json: JSON error envelope with --json after the subcommand ──────────
-
-
-def test_json_error_envelope_when_json_after_subcommand(
+def test_json_option_after_subcommand_is_usage_error(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """``sync --json`` (malformed config) emits the JSON error envelope."""
+    """The removed --json option is unknown after a subcommand."""
+    monkeypatch.chdir(tmp_path)
+
+    result = runner.invoke(app, ["list", "--json"])
+    assert result.exit_code == 2
+    body = _parse_json(result)
+    assert body["ok"] is False
+    assert body["error"]["code"] == "usage_error"
+    assert "--json" in body["error"]["message"]
+
+
+# ── domain errors use the default non-TTY JSON track ─────────────────────────
+
+
+def test_sync_error_envelope_on_json_track_by_default(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A malformed config returns a JSON error envelope without an output flag."""
     monkeypatch.chdir(tmp_path)
     (tmp_path / ".skill-manager.json").write_text("{bad", encoding="utf-8")
 
-    root_first = runner.invoke(app, ["--json", "sync"])
-    after = runner.invoke(app, ["sync", "--json"])
-    assert root_first.exit_code == 1, root_first.output
-    assert after.exit_code == 1, after.output
-    assert _parse_json(after) == _parse_json(root_first)
-    body = _parse_json(after)
+    result = runner.invoke(app, ["sync"])
+    assert result.exit_code == 1
+    body = _parse_json(result)
     assert body["ok"] is False
     assert body["error"]["code"] == "config_error"
     assert "invalid JSON" in body["error"]["message"]
@@ -167,20 +145,25 @@ def test_global_token_after_double_dash_not_hoisted(
 
     result = runner.invoke(app, ["sync", "--", "--global"])
     assert result.exit_code == 2
-    assert "--global" in _strip_ansi(result.output)
+    body = _parse_json(result)
+    assert body["ok"] is False
+    assert body["error"]["code"] == "usage_error"
+    assert "--global" in body["error"]["message"]
     assert not (paths.global_skills_dir() / "read").exists()
 
 
-def test_json_token_after_double_dash_not_hoisted(
+def test_json_token_after_double_dash_is_usage_error(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """``sync -- --json`` stays a plain parse error: no JSON envelope."""
+    """A token after -- remains an argument and produces a usage envelope."""
     monkeypatch.chdir(tmp_path)
 
     result = runner.invoke(app, ["sync", "--", "--json"])
     assert result.exit_code == 2
-    assert "--json" in _strip_ansi(result.output)
-    assert not result.stdout.lstrip().startswith("{")
+    body = _parse_json(result)
+    assert body["ok"] is False
+    assert body["error"]["code"] == "usage_error"
+    assert "--json" in body["error"]["message"]
 
 
 # ── non-hoistable flags stay put (enable --all regression) ───────────────────
@@ -211,17 +194,12 @@ def test_enable_all_not_hoisted(
 
 def test_normalize_argv_hoists_only_root_bool_flags() -> None:
     assert _normalize_argv(["sync", "--global"]) == ["--global", "sync"]
-    assert _normalize_argv(["list", "--json"]) == ["--json", "list"]
-    assert _normalize_argv(["--global", "sync", "--json"]) == ["--global", "--json", "sync"]
-    # Multiple occurrences keep their relative order; each token moves once.
-    assert _normalize_argv(["sync", "--json", "--global", "--json"]) == [
-        "--json",
-        "--global",
-        "--json",
-        "sync",
-    ]
-    # Other root flags (--version) stay in place relative to the rest.
-    assert _normalize_argv(["--version", "sync", "--json"]) == ["--json", "--version", "sync"]
+    assert _normalize_argv(["list", "--json"]) == ["list", "--json"]
+    assert _normalize_argv(["--global", "sync", "--json"]) == ["--global", "sync", "--json"]
+    assert _normalize_argv(["sync", "--json", "--global"]) == ["--global", "sync", "--json"]
+    assert _normalize_argv(["sync", "--global", "--global"]) == ["--global", "--global", "sync"]
+    # Other root or unknown options remain in their original positions.
+    assert _normalize_argv(["--version", "sync", "--json"]) == ["--version", "sync", "--json"]
 
 
 def test_normalize_argv_leaves_other_flags_and_double_dash_alone() -> None:

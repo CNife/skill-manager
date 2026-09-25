@@ -4,8 +4,8 @@ uniform ``results`` JSON wrapper.
 
 Seams under test (all pre-existing public boundaries):
 - ``run_enable`` / ``run_disable`` core runners (real filesystem)
-- typer CLI via ``CliRunner`` (arg parsing, exit codes, text, interactive input)
-- ``--json`` output shape
+- typer CLI via CliRunner (JSON-track output, arg parsing, exit codes)
+- non-TTY JSON output shape
 """
 
 from __future__ import annotations
@@ -402,6 +402,10 @@ def test_cli_enable_repo_only_usage_error(tmp_path: Path, make_source_repo, monk
     monkeypatch.chdir(project)
     result = runner.invoke(app, ["enable", "tw93/Waza"])
     assert result.exit_code == 2
+    assert result.stderr == ""
+    body = _parse_json(result)
+    assert body["ok"] is False
+    assert body["error"]["code"] == "usage_error"
 
 
 def test_cli_enable_batch_atomic_exit1(tmp_path: Path, make_source_repo, monkeypatch) -> None:
@@ -438,7 +442,7 @@ def test_json_enable_batch_results_shape(tmp_path: Path, make_source_repo, monke
     project = _seed_cli(tmp_path, make_source_repo)
     _write_config(project, [])
     monkeypatch.chdir(project)
-    result = runner.invoke(app, ["--json", "enable", "tw93/Waza", "read", "write"])
+    result = runner.invoke(app, ["enable", "tw93/Waza", "read", "write"])
     assert result.exit_code == 0, result.output
     data = _parse_json(result)["data"]
     assert [r["action"] for r in data["results"]] == ["enabled", "enabled"]
@@ -456,7 +460,7 @@ def test_json_enable_single_uses_results_wrapper(
     project = _seed_cli(tmp_path, make_source_repo)
     _write_config(project, [])
     monkeypatch.chdir(project)
-    result = runner.invoke(app, ["--json", "enable", "tw93/Waza", "read"])
+    result = runner.invoke(app, ["enable", "tw93/Waza", "read"])
     assert result.exit_code == 0, result.output
     data = _parse_json(result)["data"]
     assert data["results"] == [
@@ -480,7 +484,7 @@ def test_json_disable_batch_results_shape(tmp_path: Path, make_source_repo, monk
     )
     monkeypatch.chdir(project)
     runner.invoke(app, ["sync"])
-    result = runner.invoke(app, ["--json", "disable", "read", "write"])
+    result = runner.invoke(app, ["disable", "read", "write"])
     assert result.exit_code == 0, result.output
     data = _parse_json(result)["data"]
     assert [r["action"] for r in data["results"]] == ["disabled", "disabled"]
@@ -490,7 +494,7 @@ def test_json_disable_batch_results_shape(tmp_path: Path, make_source_repo, monk
 def test_json_disable_not_enabled_results_shape(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.chdir(tmp_path)
     _write_config(tmp_path, [])
-    result = runner.invoke(app, ["--json", "disable", "read"])
+    result = runner.invoke(app, ["disable", "read"])
     assert result.exit_code == 0, result.output
     data = _parse_json(result)["data"]
     assert data == {"results": [{"action": "not_enabled", "skill": {"name": "read"}}]}
@@ -506,7 +510,10 @@ def test_cli_interactive_enable_requires_tty(tmp_path: Path, make_source_repo, m
     # CliRunner is non-TTY; interactive enable must fail clearly, not hang.
     result = runner.invoke(app, ["enable"])
     assert result.exit_code == 1, result.output
-    assert "TTY" in result.output
+    assert result.stderr == ""
+    body = _parse_json(result)
+    assert body["error"]["code"] == "not_found"
+    assert "TTY" in body["error"]["message"]
     assert load_skill_declarations(project / ".skill-manager.json").skills == []
 
 
@@ -521,5 +528,8 @@ def test_cli_interactive_disable_requires_tty(
     monkeypatch.chdir(project)
     result = runner.invoke(app, ["disable"])
     assert result.exit_code == 1, result.output
-    assert "TTY" in result.output
+    assert result.stderr == ""
+    body = _parse_json(result)
+    assert body["error"]["code"] == "not_found"
+    assert "TTY" in body["error"]["message"]
     assert len(load_skill_declarations(project / ".skill-manager.json").skills) == 1
