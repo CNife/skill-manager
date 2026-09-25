@@ -9,6 +9,36 @@ update already cached content.
   ``(old_head, new_head)`` so callers can report real updates. Raises
   ``SourceError`` on failure (never swallowed).
 
+Cache shape: a cached Source is a *sparse slice*, not a full mirror — a blobless
+partial clone (``--filter=blob:none --sparse``, history kept in full) whose
+worktree materializes the materialization set: every directory in the tree that
+holds a ``SKILL.md``, unfiltered (hidden and noise directories included, since
+discovery can surface them under ``--all``), plus root-level files. A repo whose
+root holds ``SKILL.md`` is materialized whole instead: such a skill's assets may
+live in any subdirectory, and slicing would drop them silently.
+
+Both operations apply the set — ``clone_source`` on a fresh clone (rolling the
+clone back if it cannot be sliced, so no half-materialized cache survives a
+failure), ``pull_source`` after every pull, which slices a pre-existing full
+clone in place. The worktree is restored with git's own ``sparse-checkout
+disable``.
+
+The slice is applied as ``sparse-checkout set --cone --skip-checks``. Cone mode
+is what makes bare directory names work: it keeps the files of the ancestors of
+every listed directory (which is how root files land) and takes the names
+literally, escaping glob characters itself, where a non-cone ``set`` would read
+them as gitignore patterns — a directory called ``star*`` then matches something
+else, or nothing at all. Cone mode's own sanity checks reject such names as
+mistyped patterns, hence ``--skip-checks``: they come from ``ls-tree``, so they
+are directories by construction. This needs git 2.36+ (cone mode 2.35,
+``--skip-checks`` 2.36); older git fails loudly rather than materializing the
+wrong paths.
+
+Objects outside the slice are fetched lazily from origin, so ``git log -p`` /
+``git diff`` need the network and fail slowly without it; ``rev-parse``,
+``status`` and ``ls-tree`` stay offline-safe (which is all ``doctor`` and
+discovery use).
+
 All git calls use subprocess with list arguments (no shell).
 """
 
@@ -30,13 +60,58 @@ def repo_url(repo: str) -> str:
     return f"https://github.com/{repo}.git"
 
 
-def _run_git(args: list[str], cwd: Path | None = None) -> str:
+def _run_git(args: list[str], cwd: Path | None = None, *, strip: bool = True) -> str:
     """Run git with list args (no shell). Return stdout. Raise SourceError on failure."""
     result = subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True, check=False)
     if result.returncode != 0:
         cmd = " ".join(args)
         raise SourceError(f"git {cmd} failed (exit {result.returncode}): {result.stderr.strip()}")
-    return result.stdout.strip()
+    return result.stdout.strip() if strip else result.stdout
+
+
+_SKILL_MD = "SKILL.md"
+
+
+def _materialization_dirs(dest: Path) -> list[str] | None:
+    """Directories to materialize for ``dest``; ``None`` means the whole tree.
+
+    Every directory holding a ``SKILL.md`` is materialized — unfiltered, since
+    discovery may surface hidden and noise directories under ``--all``. Nested
+    skill roots are dropped in favor of their outermost ancestor, mirroring the
+    scanner's skill-root truncation. A ``SKILL.md`` at the tree root is a
+    whole-repo skill whose assets may sit in any subdirectory: slicing would
+    silently drop them, so the whole tree is materialized instead.
+    """
+    listing = _run_git(["ls-tree", "-r", "--name-only", "-z", "HEAD"], cwd=dest, strip=False)
+    paths = [path for path in listing.split("\0") if path]
+    if _SKILL_MD in paths:
+        return None
+    dirs: list[str] = []
+    for parent in sorted(
+        path[: -len(_SKILL_MD) - 1] for path in paths if path.endswith("/" + _SKILL_MD)
+    ):
+        if not any(parent.startswith(kept + "/") for kept in dirs):
+            dirs.append(parent)
+    return dirs
+
+
+def _apply_materialization(dest: Path) -> None:
+    """Bring ``dest``'s worktree in line with its materialization set.
+
+    Cone mode is requested explicitly: ``set`` only defaults to it from git 2.35
+    on, and cone mode is what makes bare directory names work — it keeps the
+    files of the ancestors of every listed directory (which is how root files
+    land) and treats names literally, escaping any glob characters itself.
+
+    ``--skip-checks`` goes with it: names come straight from ``ls-tree``, so a
+    directory legitimately called ``star*`` or ``!bang`` must not be mistaken for
+    a mistyped pattern and rejected.
+    """
+    dirs = _materialization_dirs(dest)
+    if dirs is None:
+        _run_git(["sparse-checkout", "disable"], cwd=dest)
+    else:
+        _run_git(["sparse-checkout", "set", "--cone", "--skip-checks", "--", *dirs], cwd=dest)
 
 
 def clone_source(
@@ -49,7 +124,8 @@ def clone_source(
     """Ensure ``repo`` is cloned into the cache; record HEAD+url in ``global_config``.
 
     Never pulls: an existing cached clone is left untouched (only its HEAD is
-    re-read). Returns the current HEAD commit sha. ``url`` defaults to
+    re-read). A fresh clone is materialized as a sparse slice (module docstring).
+    Returns the current HEAD commit sha. ``url`` defaults to
     ``repo_url(repo)``; tests pass a ``file://`` URL to use a local repo as an
     offline GitHub stand-in.
     """
@@ -59,7 +135,14 @@ def clone_source(
         raise SourceError(f"repo {repo!r} escapes the cache directory (must be 'owner/repo')")
     if not dest.exists():
         dest.parent.mkdir(parents=True, exist_ok=True)
-        _run_git(["clone", "--quiet", actual_url, str(dest)])
+        _run_git(["clone", "--quiet", "--filter=blob:none", "--sparse", actual_url, str(dest)])
+        try:
+            _apply_materialization(dest)
+        except SourceError:
+            # A clone that cannot be sliced is not a usable cache: drop it so the
+            # failure leaves nothing behind and a retry clones from scratch.
+            shutil.rmtree(dest)
+            raise
     head = _run_git(["rev-parse", "HEAD"], cwd=dest)
     global_config.sources[repo] = Source(repo=repo, commit=head, url=actual_url)
     return head
@@ -73,8 +156,10 @@ def pull_source(
     """Pull --ff-only in the cached clone of ``repo``; return ``(old_head, new_head)``.
 
     The cache is a pure mirror with no local commits, so ff always succeeds when
-    upstream is reachable. Records the new HEAD in ``global_config``. Raises
-    ``SourceError`` when the cache is missing or the pull fails.
+    upstream is reachable. The materialization set is re-derived afterwards, so
+    upstream skills join the slice and a legacy full clone is slimmed in place.
+    Records the new HEAD in ``global_config``. Raises ``SourceError`` when the
+    cache is missing or the pull fails.
     """
     dest = cache_root / repo
     if not dest.is_dir():
@@ -82,6 +167,7 @@ def pull_source(
     old = _run_git(["rev-parse", "HEAD"], cwd=dest)
     _run_git(["pull", "--quiet", "--ff-only"], cwd=dest)
     new = _run_git(["rev-parse", "HEAD"], cwd=dest)
+    _apply_materialization(dest)
     src = global_config.sources.get(repo)
     url = src.url if src is not None else repo_url(repo)
     global_config.sources[repo] = Source(repo=repo, commit=new, url=url)

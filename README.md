@@ -132,6 +132,16 @@ skill-manager source available-skills --all  # include hidden/internal skills
 
 `sync` is idempotent and never overwrites an existing non-tool symlink (it skips with a notice). Sources are derived from the declared skills' `repo` fields.
 
+**Cache shape.** A Source cache is a *sparse slice*, not a full mirror: it is cloned with `git clone --filter=blob:none --sparse` (history kept in full) and its working tree materializes only the directories that contain a `SKILL.md` — plus root-level files. The set is unfiltered, so hidden and noise directories (`node_modules/…`, `.archive/…`) land too; anything `--all` can discover is therefore on disk. A repo whose *root* holds `SKILL.md` is materialized whole, since such a skill's assets may live anywhere.
+
+`sync` / `source update` re-derive the slice on every pull, so upstream skill directories appear after one update, and a pre-existing full clone is slimmed in place — no migration step. Need the full tree back? Run git's own command:
+
+```bash
+git -C ~/.cache/skill-manager/repos/<owner>/<repo> sparse-checkout disable
+```
+
+Slicing touches the working tree only; objects outside it are fetched lazily from origin when needed, so history commands (`git log -p`, `git diff`) need the network and fail slowly when the remote is unreachable, while `rev-parse` / `status` / `ls-tree` (what `doctor`, `sync` and discovery use) stay offline-safe. Shrinking `.git` after heavy lazy fetching means removing the source and adding it again. Requires git 2.36+: the slice is applied with `git sparse-checkout set --cone --skip-checks` (cone mode landed in 2.35, the flag that declares these names directories in 2.36), and cone mode is what keeps root files and takes skill directory names literally instead of as patterns. Older git fails loudly rather than materializing the wrong paths; blobless partial clones date back to 2.19. A server that rejects `--filter` degrades to a normal clone: less saving, no failure.
+
 ### Cold start (new source, no hand-edited JSON)
 
 ```bash
@@ -151,6 +161,8 @@ Non-interactive `enable <owner/repo> <name>` clones a source that is not yet cac
 - Declared skill `path` values (including under `.archive/`) are unaffected — `sync` / `list` still honor project config as written.
 
 Layouts like `skills/.curated/...` therefore need `--all` to appear in discovery (stricter default than some installers that whitelist curated paths).
+
+The cache materializes every directory holding a `SKILL.md`, so this scanner sees exactly the skills a full clone would.
 
 With `--json`, success is `{"ok": true, "data": ...}` and failure is
 `{"ok": false, "error": {"code", "message"}}` (exit `0` / `1` / `2` for success /
@@ -174,6 +186,10 @@ marks the same overlap with `⊕` before the name; interactive enable uses
 | Project skills | `./.agents/skills/` |
 | Global skills declaration | `~/.skill-manager.json` |
 | Global skills | `~/.agents/skills/` |
+
+A Source cache is a sparse slice of its repo — an ordinary git worktree you can
+run git in, but with only the skill directories materialized (see [Source
+repository management](#source-repository-management)).
 
 ## Roadmap
 
