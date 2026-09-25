@@ -35,11 +35,19 @@ def make_source_repo(tmp_path: Path):
     """Factory: create a cloneable source repo with skill dirs containing SKILL.md.
 
     ``skills`` maps skill path -> SKILL.md content; path ``"."`` places SKILL.md
-    at the repo root (repo-root skill case). Returns the source repo Path; tests
-    build the ``file://`` URL and may add commits to simulate upstream advances.
+    at the repo root (repo-root skill case). ``extra_files`` maps relative path
+    -> content for non-skill files (assets, root files, noise trees) that the
+    materialization set must or must not bring along. Returns the source repo
+    Path; tests build the ``file://`` URL and may add commits to simulate
+    upstream advances.
     """
 
-    def _make(name: str, skills: dict[str, str]) -> Path:
+    def _make(
+        name: str,
+        skills: dict[str, str],
+        *,
+        extra_files: dict[str, str] | None = None,
+    ) -> Path:
         repo = tmp_path / "sources" / name
         repo.mkdir(parents=True)
         _git(["init"], repo)
@@ -49,6 +57,10 @@ def make_source_repo(tmp_path: Path):
             skill_dir = repo if skill_path == "." else repo / skill_path
             skill_dir.mkdir(parents=True, exist_ok=True)
             (skill_dir / "SKILL.md").write_text(content, encoding="utf-8")
+        for file_path, content in (extra_files or {}).items():
+            target = repo / file_path
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(content, encoding="utf-8")
         _git(["add", "."], repo)
         _git(["commit", "-m", "init"], repo)
         return repo
