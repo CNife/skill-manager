@@ -8,7 +8,8 @@
 # Contract with the driving agent (skill-manager issue #8):
 #   - stdout: `skill-manager sync` output flows straight through, followed by
 #     exactly one `E2E_MANIFEST {...}` line emitted on EXIT (success or failure).
-#   - stderr: sync failure diagnostics (`Error: ...`).
+#   - stderr: script-level diagnostics; `skill-manager sync` writes to stdout
+#     here (stdout is a pipe, so sync takes its JSON track), failures included.
 #   - exit code: the process exit code (0 = setup+sync ok, non-zero = infra fail).
 #
 # The manifest carries the isolated paths the agent needs to assert against, plus

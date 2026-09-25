@@ -30,7 +30,7 @@ Execute the script and capture the full stdout and exit code. It builds an isola
 
 ### 2. Route on exit code
 
-- **Non-zero exit**: an **infra failure** — setup or sync broke. Grep the `E2E_MANIFEST` line for `root` (preserve that tmpdir for triage), read stderr, and go straight to the verdict.
+- **Non-zero exit**: an **infra failure** — setup or sync broke. Grep the `E2E_MANIFEST` line for `root` (preserve that tmpdir for triage), read sync's error (the `{"ok":false,...}` envelope on stdout, or stderr from the script itself), and go straight to the verdict.
 - **Zero exit**: sync succeeded; continue to assertion.
 
 **Completion criterion**: you have routed to exactly one path — infra failure (verdict) or sync success (assertion).
@@ -55,7 +55,7 @@ Let `REPO=CNife/skill-manager-e2e-fixture` and `CACHE=$xdg_cache_home/skill-mana
 2. **SKILL.md readable**: reading `SKILL.md` through that symlink, its first line is `---`.
 3. **Ledger HEAD consistent**: in `$xdg_config_home/skill-manager/config.json`, `sources["CNife/skill-manager-e2e-fixture"].commit` equals `git -C "$CACHE" rev-parse HEAD` (compare the two live values).
 4. **Clone happened**: `$CACHE/.git` exists.
-5. **sync output**: the script stdout excluding the `E2E_MANIFEST` line contains both `ensured CNife/skill-manager-e2e-fixture` and `created e2e-fixture`.
+5. **sync output**: script stdout (captured, so not a TTY) carries sync's JSON envelope — `{"ok":true,...}` with `"repo":"CNife/skill-manager-e2e-fixture"` / `"action":"cloned"` under `data.sources`, and `"name":"e2e-fixture"` / `"action":"created"` under `data.links`.
 
 **Completion criterion**: every one of the five points has been asserted and carries a pass/fail plus evidence.
 
@@ -63,6 +63,6 @@ Let `REPO=CNife/skill-manager-e2e-fixture` and `CACHE=$xdg_cache_home/skill-mana
 
 - **All five pass**: verdict is **PASS**; you may delete `$root`.
 - **Any fail**: verdict is **FAIL**; list each failing point with its evidence, and **preserve `$root`** for triage, stating the path in the verdict.
-- **Infra failure** (step 2): verdict is **FAIL (infra)**; summarize stderr and state `$root`, preserving it.
+- **Infra failure** (step 2): verdict is **FAIL (infra)**; summarize the error output and state `$root`, preserving it.
 
 **Completion criterion**: a single unambiguous PASS or FAIL verdict has been emitted, and on any FAIL the `$root` path is stated and the tmpdir preserved.

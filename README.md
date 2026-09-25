@@ -15,7 +15,7 @@ Project Links live under `./.agents/skills/`; user-global Links under `~/.agents
 - **Enable / disable** — interactive filterable picker (TTY) or non-interactive batch `enable <repo> <name>...` / `disable <name>...`
 - **Manage source cache** — `skill-manager source list|add|remove|update|available-skills`
 - **Global skills** - `--global` flag applies any command to user-global skills (`~/.skill-manager.json`, `~/.agents/skills/`)
-- **Scripting / CI** — root `--json` on every command (`skill-manager --json <cmd> ...`)
+- **Scripting / CI** — every command writes one compact JSON object when stdout is not a terminal (see [Output](#output)); no flag to remember
 
 ## Install
 
@@ -56,22 +56,34 @@ skill-manager enable <repo> <name>...  # non-interactive batch enable (path deri
 skill-manager enable --all ...         # include hidden/internal skills when resolving
 skill-manager disable                  # interactive TTY: multi-select enabled skills
 skill-manager disable <name>...        # non-interactive batch disable
-skill-manager --json sync              # single JSON object on stdout (all commands)
 ```
 
-Example `list` output — every skill row carries one actionable status word:
+On a terminal, `skill-manager list` is a sectioned, column-aligned table:
 
 ```
-Sources:
-  tw93/Waza  3f2a1c9d  cached
-Skills:
-  read    tw93/Waza:skills/read  linked
-  kami    tw93/Kami:.            unlinked
+Sources
+╭──────────┬──────────┬───────╮
+│repo      │ HEAD     │ status│
+├──────────┼──────────┼───────┤
+│tw93/Waza │ 7f7a1c8e │ cached│
+╰──────────┴──────────┴───────╯
+
+Skills
+╭─────────┬────────┬────────┬───────────┬────────────────╮
+│name     │ status │ global │ repo      │ path           │
+├─────────┼────────┼────────┼───────────┼────────────────┤
+│read     │ linked │        │ tw93/Waza │ skills/read    │
+│research │ linked │        │ tw93/Waza │ skills/research│
+╰─────────┴────────┴────────┴───────────┴────────────────╯
 ```
 
-- `linked` = normal; `unlinked` / `broken` = fixable with `skill-manager sync`; `external` = the link points elsewhere and is left alone
-- On a TTY, status words and `Error:` / `Warning:` prefixes are colored (`linked` green, `broken` red, `external` / `unlinked` / prefixes yellow); piped output and `--json` stay plain (set `NO_COLOR` to force plain output)
-- Paths in `enable` / `disable` / `sync` output are shown relative to the current directory when possible (`.skill-manager.json`, `.agents/skills/read`), else `~`-abbreviated (`~/.skill-manager.json`), else absolute
+- `name` is the bare skill name; `status` is one actionable word per row: `linked` = normal, `unlinked` / `broken` = fixable with `skill-manager sync`, `external` = the link points elsewhere and is left alone
+- `global` carries a cross-scope mark: `⊕` = also enabled globally from the *same* source, `⚠` = enabled globally from a *different* source (a conflict to resolve). Whichever mark appears is explained by the legend under the table
+- `repo` and `path` sit on the right: the low-value long fields never push the important ones off screen, and a narrow terminal folds a long `path` rather than clipping it
+- Status words are colored by meaning (`linked` green, `broken` red, `external` / `unlinked` yellow); `NO_COLOR` keeps the table structure and drops the color
+- Long operations show one in-place progress line that leaves no residue; each operation ends as exactly one result line (`✓ repo action commit`, `✓ skill linked target`)
+- Paths in `enable` / `disable` / `sync` output are shown relative to the current directory when possible (`.agents/skills/read`), else `~`-abbreviated (`~/.skill-manager.json`), else absolute
+- `doctor` groups problems into one section per code, busiest code first, and states a fix once per section when every problem in it shares one; when fixes differ, each row keeps its own `fix` column
 
 ### Batch enable / disable
 
@@ -95,7 +107,7 @@ skill-manager --global sync                  # link globally-declared skills int
 skill-manager --global list                  # show global skills status
 skill-manager --global enable <repo> <name>...  # declare globally + sync (batch)
 skill-manager --global disable <name>...        # remove global declarations + links (batch)
-skill-manager --json --global list           # JSON output composes with --global
+skill-manager --global list | jq '.data.skills'   # JSON when stdout is piped
 ```
 
 Running `skill-manager` from `~` without `--global` targets `~/.skill-manager.json` too (home *is* the global project) — intentional, not a collision.
@@ -164,18 +176,35 @@ Layouts like `skills/.curated/...` therefore need `--all` to appear in discovery
 
 The cache materializes every directory holding a `SKILL.md`, so this scanner sees exactly the skills a full clone would.
 
-With `--json`, success is `{"ok": true, "data": ...}` and failure is
-`{"ok": false, "error": {"code", "message"}}` (exit `0` / `1` / `2` for success /
-business error / usage error). Place `--json` before the subcommand:
-`skill-manager --json list`, not `skill-manager list --json`.
+## Output
 
-In **project** scope, `list` and `enable` JSON also include a per-skill boolean
+Output has two tracks, and **stdout alone** decides which one runs — is it a terminal or not?
+
+- **Human output** (stdout is a TTY): Rich rendering. Structured data becomes sectioned, box-drawn tables; progress, empty states and errors stay a plain line stream that never pretends to be a table. Errors are `✗  Error: …` on stderr.
+- **JSON output** (pipe, redirect, CI): one compact JSON object on stdout, no color, no progress lines.
+
+```bash
+skill-manager list | jq '.data.skills[].name'   # JSON: no flag to remember
+skill-manager doctor > report.json              # JSON here too
+```
+
+Success is `{"ok":true,"data":…}`; failure is
+`{"ok":false,"error":{"code","message"}}` (exit `0` / `1` / `2` for success /
+business error / usage error). Separators are tight (`,` and `:` carry no
+space), so a reader pays no tokens for decoration. A usage error on a pipe is
+the same JSON envelope rather than click's ASCII help, so one parser reads
+every failure. Field shapes are unchanged, so existing paths like
+`jq '.data.problems[].code'` keep working. `--help` / `--version` /
+`--show-completion` are CLI metadata: they stay click-native on both tracks.
+
+In **project** scope, `list` and `enable` JSON include a per-skill boolean
 `enabled_globally` (matched by skill **name** against `~/.skill-manager.json`).
 It is omitted under `--global`. If the global declaration exists but cannot be
 read, the command still succeeds, values are `false`, and a top-level
 `warnings: [{code: "global_config_error", message}]` is added. Human `list`
-marks the same overlap with `⊕` before the name; interactive enable uses
-`✓` (project-locked) and `⊕` (global) glyphs without blocking selection.
+shows the same overlap in the `global` column (`⊕` same source, `⚠` different
+source); interactive enable uses `✓` (project-locked) and `⊕` (global) glyphs
+without blocking selection.
 
 ## Paths (XDG)
 

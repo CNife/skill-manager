@@ -29,6 +29,7 @@ from pathlib import Path
 import pytest
 from helpers import skill_md
 from rich.console import Console
+from rich.text import Text
 
 from skill_manager import paths, render
 from skill_manager.cli import run_enable
@@ -143,11 +144,12 @@ def _render(
     width: int = 100,
     no_color: bool = False,
 ) -> Rendered:
-    """Render ``result`` through ``view`` on a fixed-width captured console.
+    """Render ``result`` through ``view`` on a fixed-size captured console.
 
-    ``height`` must be pinned too: Rich only honours ``width`` when both
-    dimensions are set, otherwise it asks the (non-)terminal and falls back to
-    80 columns.
+    Both dimensions and ``TERM`` are pinned: Rich only honours ``width`` when
+    ``height`` is set too, and it reads ``TERM`` to decide between in-place and
+    plain output, so an unpinned console renders differently on a CI runner
+    (``TERM=dumb``) than on a developer's terminal.
     """
     stream = io.StringIO()
     console = Console(
@@ -157,10 +159,32 @@ def _render(
         force_terminal=True,
         color_system="standard",
         no_color=no_color,
+        _environ=_RENDER_ENVIRON(width),
     )
     view(console, result)
     raw = stream.getvalue()
     return Rendered(raw=raw, plain=ANSI.sub("", raw))
+
+
+def _RENDER_ENVIRON(width: int) -> dict[str, str]:
+    """Environment for a deterministic rendering console (see :func:`_render`)."""
+    return {"TERM": "xterm-256color", "COLUMNS": str(width), "LINES": "40"}
+
+
+class _PrintSpy(Console):
+    """Console that records durable *text* writes, so a test can prove there were none.
+
+    Rich's own live-line teardown prints an empty ``NewLine`` to land the cursor
+    on a fresh row; that is not text, so only strings and ``Text`` are recorded.
+    """
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.printed: list[str] = []
+
+    def print(self, *objects, **kwargs) -> None:
+        self.printed.extend(str(obj) for obj in objects if isinstance(obj, (str, Text)))
+        super().print(*objects, **kwargs)
 
 
 class RecordingSink:
@@ -515,6 +539,18 @@ def test_outcome_stream_has_no_table_frame_or_header() -> None:
     ]
 
 
+def test_outcome_columns_align_by_cell_width_not_code_points() -> None:
+    """A CJK label takes two cells: counting code points would push the next column out."""
+    rendered = _render(
+        render.render_outcomes,
+        [Outcome("研究", "linked", "a"), Outcome("read", "linked", "b")],
+    )
+    assert rendered.lines == [
+        "  ✓  研究  linked  a",
+        "  ✓  read  linked  b",
+    ]
+
+
 def test_outcome_noop_is_dotted_not_checked() -> None:
     rendered = _render(render.render_outcomes, [Outcome("read", "already enabled", ok=False)])
     assert rendered.lines == ["  ·  read  already enabled"]
@@ -692,18 +728,45 @@ def test_display_path_shows_the_link_not_its_target(
 # ── f. progress sink ─────────────────────────────────────────────────────────
 
 
-def test_progress_live_line_never_commits_a_line() -> None:
-    """The live line is in-place: it must not write a newline-terminated line."""
-    stream = io.StringIO()
-    progress = Progress(Console(file=stream, width=100, force_terminal=True))
+def test_progress_live_line_never_commits_its_text() -> None:
+    """The live line is in-place: progress text never reaches a durable write.
+
+    Rich decides in-place vs plain from ``TERM``, so the environment is pinned:
+    on a dumb terminal the sink degrades to writing nothing at all, which would
+    let this pass for the wrong reason (see the sibling test below).
+    """
+    console = _PrintSpy(
+        file=io.StringIO(),
+        width=100,
+        height=40,
+        force_terminal=True,
+        _environ=_RENDER_ENVIRON(100),
+    )
+    progress = Progress(console)
     progress.start("pulling tw93/Waza...")
     progress.done("pulled tw93/Waza (cafe0000 → beef0000)")
-    assert "\n" not in stream.getvalue()
+    assert console.printed == []
+
+
+def test_progress_is_silent_without_an_interactive_terminal() -> None:
+    """A dumb terminal cannot do in-place, so the sink writes nothing — not text."""
+    stream = io.StringIO()
+    console = Console(
+        file=stream,
+        width=100,
+        height=40,
+        force_terminal=True,
+        _environ={"TERM": "dumb", "COLUMNS": "100", "LINES": "40"},
+    )
+    progress = Progress(console)
+    progress.start("pulling tw93/Waza...")
+    progress.done("pulled tw93/Waza (cafe0000 → beef0000)")
+    assert stream.getvalue() == ""
 
 
 def test_progress_tolerates_repeated_start_and_bare_done() -> None:
     """A ``done`` without a live ``start`` is harmless (no status to stop)."""
-    console = Console(file=io.StringIO(), width=100, force_terminal=True)
+    console = Console(file=io.StringIO(), width=100, height=40, force_terminal=True)
     progress = Progress(console)
     progress.done("nothing was running")
     progress.start("pulling x...")

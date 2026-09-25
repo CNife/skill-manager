@@ -56,6 +56,14 @@ _Avoid_: add, install, 添加, 安装
 从当前 Scope 的技能声明文件移除一条或多条 Skill declaration 并清理对应 Link；TTY 下可交互多选已启用项，也可 `disable <name>…` 非交互批量禁用（宽松：未启用的名字为幂等 no-op）。
 _Avoid_: remove, uninstall, 删除, 卸载
 
+**Human output / 人类输出**:
+stdout 是 TTY 时的输出轨：由 `render` 模块用 Rich 渲染——结构化的走分节表格，进度/空态/错误走不成表的行流，长任务留一行原地刷新的实时行。带色，面向终端前的人。
+_Avoid_: text output, pretty output, 文本轨, 人读输出
+
+**JSON output / JSON 输出**:
+stdout 不是 TTY（管道、重定向、CI）时的默认输出轨：stdout 上单个紧凑 JSON 对象，无色、无进度行，面向 agent 与脚本。轨道由命令自身按 stdout 判定，没有开关旗标。
+_Avoid_: --json mode, machine mode, 机器轨, 结构化输出
+
 ## Dual-scope model
 
 Two declaration scopes share one model, one Source cache, and one Global config
