@@ -4,7 +4,7 @@ How the engineering skills should consume this repo's domain documentation when 
 
 ## Before exploring, read these
 
-- **`CONTEXT.md`** at the repo root
+- **`GLOSSARY.md`** at the repo root
 - **`docs/adr/`** — ADRs that touch the area you're about to work in
 
 If any of these are missing, **proceed silently**. `/domain-modeling` (via `/grill-with-docs` and `/improve-codebase-architecture`) creates them lazily when terms or decisions resolve.
@@ -15,7 +15,7 @@ Single-context:
 
 ```
 /
-├── CONTEXT.md
+├── GLOSSARY.md
 ├── docs/adr/
 │   ├── 0001-symlink-not-copy.md
 │   ├── 0002-sources-derived-from-declarations.md
@@ -26,7 +26,7 @@ Single-context:
 
 ## Use the glossary's vocabulary
 
-When your output names a domain concept (issue title, refactor proposal, hypothesis, test name), use the term as defined in `CONTEXT.md`. Synonyms under `_Avoid_` are out of bounds.
+When your output names a domain concept (issue title, refactor proposal, hypothesis, test name), use the term as defined in `GLOSSARY.md`. Synonyms under `_Avoid_` are out of bounds.
 
 If the concept isn't in the glossary yet — either inventing language the project doesn't use (reconsider), or a real gap (note it for `/domain-modeling`).
 
