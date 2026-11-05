@@ -57,7 +57,7 @@ _Avoid_: add, install, 添加, 安装
 _Avoid_: remove, uninstall, 删除, 卸载
 
 **Board / 看板**:
-`skill-manager board` 打开的一屏界面：列出当前 Scope 全部可声明技能，按 Source 分节；每行的勾选状态就是目标声明态（新勾选 = 启用、取消勾选 = 禁用、同名换行 = 换源），空格切换、Enter 原子提交、Esc 取消。与交互式 `enable` / `disable` 的区别：Board 同时呈现两个方向，并在提交前校验整批。
+裸 `skill-manager`（不带子命令）打开的一屏界面：列出当前 Scope 全部可声明技能，按 Source 分节；每行的勾选状态就是目标声明态（新勾选 = 启用、取消勾选 = 禁用、同名换行 = 换源），空格切换、Enter 原子提交、Esc 取消。与交互式 `enable` / `disable` 的区别：Board 同时呈现两个方向，并在提交前校验整批。
 _Avoid_: TUI, manage screen, dashboard, 面板
 
 **Human output / 人类输出**:
