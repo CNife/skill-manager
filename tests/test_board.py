@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import io
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -249,6 +250,49 @@ def test_rows_mark_global_overlap_and_conflict(tmp_path: Path, make_source_repo)
     assert board_row_title(rows["kami"]).startswith("⚠ kami")
 
 
+def test_rows_mark_project_overlap_on_the_global_board(
+    tmp_path: Path, make_source_repo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """⊕/⚠ work on the global board too, pointing at the cwd project."""
+    project, cache, gconfig, skills_dir = _env(tmp_path, make_source_repo)
+    (Path.home() / ".skill-manager.json").write_text(
+        json.dumps(
+            {
+                "skills": [
+                    {"name": "read", "repo": "tw93/Waza", "path": "skills/read"},
+                    {"name": "write", "repo": "tw93/Waza", "path": "skills/write"},
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    (project / ".skill-manager.json").write_text(
+        json.dumps(
+            {
+                "skills": [
+                    {"name": "read", "repo": "tw93/Waza", "path": "skills/read"},
+                    {"name": "write", "repo": "cnife/other", "path": "skills/write"},
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(project)
+    ui = ScriptedBoard(cancel=True)
+    with pytest.raises(PickerCancelled):
+        run_board(Path.home() / ".skill-manager.json", gconfig, cache, skills_dir, ui=ui)
+    rows = {(row.repo, row.path): row for row in ui.board.rows}
+    read_row = rows[("tw93/Waza", "skills/read")]
+    assert read_row.enabled_globally and not read_row.global_conflict
+    assert board_row_title(read_row).startswith("⊕ ")
+    assert "in this project (same source)" in board_row_description(read_row)
+    write_row = rows[("tw93/Waza", "skills/write")]
+    assert write_row.enabled_globally and write_row.global_conflict
+    assert board_row_title(write_row).startswith("⚠ ")
+    assert "in this project from a different source" in board_row_description(write_row)
+    assert "globally" not in board_row_description(write_row)
+
+
 # ── commit ───────────────────────────────────────────────────────────────────
 
 
@@ -335,6 +379,53 @@ def test_board_swaps_a_name_to_another_source(tmp_path: Path, make_source_repo) 
     ]
     assert _declared(project) == [("read", "cnife/other", "skills/read")]
     assert _link_target(skills_dir, "read") == (cache / "cnife/other/skills/read").resolve()
+
+
+def test_board_all_lists_internal_skills_and_enables_them(
+    tmp_path: Path, make_source_repo
+) -> None:
+    """--all widens the board's scan like enable: internal rows may exist and enable."""
+    project, cache, gconfig, skills_dir = _env(
+        tmp_path,
+        make_source_repo,
+        skills={
+            "skills/read": skill_md("read", "Read things"),
+            "skills/secret": skill_md(
+                "secret", "Internal skill", extra_fm="metadata:\n  internal: true\n"
+            ),
+        },
+    )
+    default_rows = ScriptedBoard(cancel=True)
+    with pytest.raises(PickerCancelled):
+        run_board(project / ".skill-manager.json", gconfig, cache, skills_dir, ui=default_rows)
+    assert default_rows.board is not None
+    assert not any(row.name == "secret" for row in default_rows.board.rows)
+
+    all_rows = ScriptedBoard(cancel=True)
+    with pytest.raises(PickerCancelled):
+        run_board(
+            project / ".skill-manager.json",
+            gconfig,
+            cache,
+            skills_dir,
+            include_all=True,
+            ui=all_rows,
+        )
+    assert all_rows.board is not None
+    secret = next(row for row in all_rows.board.rows if row.name == "secret")
+    assert not secret.declared
+
+    result = run_board(
+        project / ".skill-manager.json",
+        gconfig,
+        cache,
+        skills_dir,
+        include_all=True,
+        ui=ScriptedBoard({"secret"}),
+    )
+    assert [(o.action, o.skill["name"]) for o in result.enabled] == [("enabled", "secret")]
+    assert _declared(project) == [("secret", "tw93/Waza", "skills/secret")]
+    assert _link_target(skills_dir, "secret") == (cache / "tw93/Waza/skills/secret").resolve()
 
 
 def test_board_cancel_writes_nothing(tmp_path: Path, make_source_repo) -> None:
@@ -458,13 +549,17 @@ def test_board_command_refuses_a_pipe(tmp_path: Path, monkeypatch: pytest.Monkey
 # ── rendering ────────────────────────────────────────────────────────────────
 
 
+ANSI = re.compile(r"\x1b\[[0-9;?]*[a-zA-Z]")
+
+
 def _render(result: BoardResult) -> list[str]:
     stream = io.StringIO()
     console = Console(
         file=stream, width=100, height=40, force_terminal=True, color_system="standard"
     )
     render_board(console, result)
-    return [line.rstrip() for line in stream.getvalue().splitlines() if line.strip()]
+    plain = ANSI.sub("", stream.getvalue())
+    return [line.rstrip() for line in plain.splitlines() if line.strip()]
 
 
 def test_render_board_lists_disabled_then_enabled() -> None:
@@ -496,7 +591,7 @@ def test_render_board_lists_disabled_then_enabled() -> None:
     assert "disabled" in lines[0] and "old" in lines[0]
     assert "new" in lines[1] and "b/two:skills/new" in lines[1]
     assert lines[1].index("new") < lines[1].rindex("b/two")
-    assert lines[2].rstrip().endswith("⚠")
+    assert lines[2].endswith("⚠")
     assert "different source" in lines[3]
 
 

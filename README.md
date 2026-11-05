@@ -107,10 +107,10 @@ Skills
 - **Checkboxes are the wanted state.** Newly checked rows are enabled, unchecked rows are disabled, and pressing Enter with nothing changed writes nothing. `unsaved +N −M` in the prompt is the only change preview.
 - **A name appears once.** Checking a same-name row from another source unchecks the old one in the same keystroke: that is how you move a skill between sources.
 - **Rows are grouped by source**, with declared skills the cache can no longer serve in a trailing `declared · not in cache` group — unchecking them removes the stale declaration.
-- **Two cross-scope marks**: `⊕` = also enabled globally from the *same* source (benign), `⚠` = enabled globally from a *different* source (a conflict). Link state is spelled out (`link broken`, `not linked`, `link outside this manager`) because the board can show it but `sync` is what fixes it.
+- **Two cross-scope marks**: `⊕` = also declared in the *other* scope from the *same* source (benign), `⚠` = declared in the other scope from a *different* source (a conflict); the detail line names the scope (`also enabled globally …` on a project board, `also enabled in this project …` on a global one). Link state is spelled out (`link broken`, `not linked`, `link outside this manager`) because the board can show it but `sync` is what fixes it.
 - **The commit is atomic**: a name checked twice, or a new enable that collides across scopes, rejects the whole batch before anything is written — the message names the `disable` / `--global disable` call that resolves it. Declaration edits land in one file write, then new sources are cloned (never pulled) and links created.
 - **Terminal only**: with stdout piped the command exits 1 with a JSON error; scripts keep using `enable <repo> <name>...` / `disable <name>...`.
-- Hidden and internal skills are not listed by default (same rule as `enable`); a declared one still shows up so it can be turned off.
+- Hidden and internal skills are not listed by default (same rule as `enable`); a declared one still shows up so it can be turned off, and `--all` widens the listing exactly like it does for `enable`.
 
 ### Batch enable / disable
 

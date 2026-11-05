@@ -136,14 +136,20 @@ def board_row_title(row: BoardRow) -> str:
 
 def board_row_description(row: BoardRow) -> str:
     """The one line shown to the right of the pointed row."""
+    if row.other_scope_label == "project":
+        conflict_words = "enabled in this project from a different source"
+        overlap_words = "also enabled in this project (same source)"
+    else:
+        conflict_words = "enabled globally from a different source"
+        overlap_words = "also enabled globally (same source)"
     if not row.available:
         parts = [f"declared from {row.repo}:{row.path} — not in cache"]
     else:
         parts = [row.path]
     if row.global_conflict:
-        parts.append("enabled globally from a different source")
+        parts.append(conflict_words)
     elif row.enabled_globally:
-        parts.append("also enabled globally (same source)")
+        parts.append(overlap_words)
     if row.description:
         parts.append(row.description)
     return "  ·  ".join(parts)

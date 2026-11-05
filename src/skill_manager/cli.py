@@ -1726,7 +1726,7 @@ def _build_board(
     skills_dir: Path,
     *,
     scope: str,
-    global_hint: dict[str, tuple[str, str]] | None,
+    other_scope: dict[str, tuple[str, str]] | None,
     include_all: bool = False,
 ) -> Board:
     """Rows from every cached Source, plus declarations the cache cannot serve.
@@ -1741,11 +1741,12 @@ def _build_board(
     where unchecking is the only action that means anything.
     """
     declared_by_path = {(skill.repo, skill.path): skill for skill in declarations.skills}
+    other_is_project = scope == "global"
 
     def overlap(skill_repo: str, name: str) -> tuple[bool, bool]:
-        if global_hint is None:
+        if other_scope is None:
             return False, False
-        hit = global_hint.get(name)
+        hit = other_scope.get(name)
         if hit is None:
             return False, False
         return True, hit[0] != skill_repo
@@ -1773,6 +1774,7 @@ def _build_board(
             ),
             enabled_globally=globally,
             global_conflict=conflict,
+            other_scope_label="project" if other_is_project else "global",
             available=available,
         )
 
@@ -1961,12 +1963,13 @@ def run_board(
     declarations = _load_declarations_for_enable(project_config)
     global_hint, warnings = _load_global_enabled_hint(project_config)
     global_scope = _is_global_scope(project_config)
+    other_scope = _load_project_hint(project_config) if global_scope else global_hint
     board = _build_board(
         declarations,
         cache_root,
         skills_dir,
         scope="global" if global_scope else "project",
-        global_hint=global_hint,
+        other_scope=other_scope,
         include_all=include_all,
     )
     if board.is_empty:
@@ -1978,7 +1981,6 @@ def run_board(
     batch = board_plan(board, adapter.select(board))
     if batch.is_empty:
         return BoardResult(warnings=warnings)
-    other_scope = _load_project_hint(project_config) if global_scope else global_hint
     _reject_cross_scope(batch, other_scope, global_scope=global_scope)
     result = _board_apply(
         project_config,
@@ -2144,7 +2146,16 @@ def disable(
 
 
 @app.command()
-def board(ctx: typer.Context) -> None:
+def board(
+    ctx: typer.Context,
+    include_all: Annotated[
+        bool,
+        typer.Option(
+            "--all",
+            help="Include hidden (dot-dir) and internal skills.",
+        ),
+    ] = False,
+) -> None:
     """Toggle the scope's skills on one screen (interactive terminal only)."""
     try:
         console = render.make_console()
@@ -2154,6 +2165,7 @@ def board(ctx: typer.Context) -> None:
             paths.config_file(),
             paths.repos_cache_dir(),
             skills_dir,
+            include_all=include_all,
             progress=render.Progress(console),
         )
         for warning in result.warnings:

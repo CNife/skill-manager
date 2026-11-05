@@ -41,6 +41,7 @@ class BoardRow:
     link: str = "unlinked"  # linked | broken | external | unlinked
     enabled_globally: bool = False  # ⊕ same source, other scope
     global_conflict: bool = False  # ⚠ different source, other scope
+    other_scope_label: str = "global"  # the other scope this row is marked against
     available: bool = True
 
     @property
