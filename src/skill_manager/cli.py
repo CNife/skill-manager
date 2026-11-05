@@ -21,11 +21,15 @@ from typer import _click as click
 from typer.core import TyperGroup
 
 from skill_manager import __version__, config, links, paths, render, sources
+from skill_manager.board import Board, BoardError, BoardGroup, BoardPlan, BoardRow
+from skill_manager.board import plan as board_plan
 from skill_manager.config import ConfigError, SkillRef
 from skill_manager.links import LinkError
 from skill_manager.picker import (
+    BoardUI,
     Picker,
     PickerCancelled,
+    QuestionaryBoard,
     QuestionaryPicker,
     SkillChoice,
     SourceChoice,
@@ -34,6 +38,7 @@ from skill_manager.picker import (
 from skill_manager.render import ProgressSink
 from skill_manager.results import (
     AvailableSkillsResult,
+    BoardResult,
     DisableOutcome,
     DisableResult,
     DoctorProblem,
@@ -286,7 +291,7 @@ def _error_code(exc: Exception) -> str:
         return "usage_error"
     if isinstance(exc, NotFoundError):
         return "not_found"
-    if isinstance(exc, ConfigError):
+    if isinstance(exc, (ConfigError, BoardError)):
         return "config_error"
     if isinstance(exc, SourceError):
         return "source_error"
@@ -984,7 +989,7 @@ def _scan_skills(repo_dir: Path, repo: str, *, include_all: bool = False) -> lis
     Default (include_all=False): skip noise dir names, dot-directories, and
     skills with metadata.internal: true. Always stop recursion at a skill root
     (directory containing SKILL.md). Qualification (UTF-8 + FM name/description)
-    always applies; ``--all`` only widens noise/internal filters.
+    always applies; ``--all`` only widens the noise / dot-directory / internal filters.
     """
     del repo  # discovery name comes from FM, not the repo id
     skills: list[ScannedSkill] = []
@@ -1447,19 +1452,11 @@ def _enable_apply_batch(
             continue
         g = other_scope.get(skill_name) if other_scope is not None else None
         if g is not None and g[0] != skill_repo:
-            if global_scope:
-                failures.append(
-                    f"skill {skill_name!r} is already enabled in the project (cwd) from "
-                    f"{g[0]}:{g[1]}; enabling {skill_repo}:{skill_path} would create a "
-                    f"cross-scope name conflict; disable it first: "
-                    f"skill-manager disable {skill_name}"
+            failures.append(
+                _cross_scope_conflict(
+                    skill_name, skill_repo, skill_path, g, global_scope=global_scope
                 )
-            else:
-                failures.append(
-                    f"skill {skill_name!r} is already enabled globally from {g[0]}:{g[1]}; "
-                    f"enabling {skill_repo}:{skill_path} would create a cross-scope name "
-                    f"conflict; disable it first: skill-manager --global disable {skill_name}"
-                )
+            )
             continue
         batch_added[skill_name] = (skill_repo, skill_path)
         accepted.append((skill_name, skill_repo, skill_path))
@@ -1502,45 +1499,66 @@ def _enable_apply_batch(
     sync_result = None
     if added_refs:
         config.save_skill_declarations(project_config, proj)
-        global_cfg = config.load_global_config(global_config_path)
-        resolver = url_resolver or sources.repo_url
-        ensured_sources: list[SourceEnsured] = []
-        seen_repos: set[str] = set()
-        for skill_ref in added_refs:
-            if skill_ref.repo in seen_repos:
-                continue
-            seen_repos.add(skill_ref.repo)
-            # Never pulls: clone_source is a no-op for a cached source, so the
-            # live line only appears when this run actually fills the cache.
-            _progress_start(progress, f"preparing source {skill_ref.repo}...")
-            head = sources.clone_source(
-                skill_ref.repo, global_cfg, cache_root, url=resolver(skill_ref.repo)
-            )
-            _progress_done(progress, f"prepared source {skill_ref.repo} ({head[:8]})")
-            # "cloned" reports an actual cache fill by this run (clone_source
-            # never pulls, so a source not in cloned_repos was already cached).
-            action = "cloned" if (cloned_repos and skill_ref.repo in cloned_repos) else "up_to_date"
-            ensured_sources.append(
-                SourceEnsured(
-                    repo=skill_ref.repo,
-                    commit=head,
-                    action=action,
-                )
-            )
-        config.save_global_config(global_config_path, global_cfg)
-        sync_result = SyncResult(sources=ensured_sources)
-        for skill_ref in added_refs:
-            _progress_start(progress, f"linking {skill_ref.name}...")
-            link_result = links.ensure_link(skill_ref, cache_root, skills_dir)
-            sync_result.links.append(
-                LinkDone(name=skill_ref.name, action=link_result.action, target=link_result.target)
-            )
-            _progress_done(
-                progress,
-                f"{link_result.action} {skill_ref.name} -> "
-                f"{render.display_path(link_result.target)}",
-            )
+        sync_result = _ensure_sources_and_links(
+            added_refs,
+            global_config_path,
+            cache_root,
+            skills_dir,
+            url_resolver=url_resolver,
+            progress=progress,
+            cloned_repos=cloned_repos,
+        )
     return EnableResult(outcomes=outcomes, sync=sync_result, warnings=warnings)
+
+
+def _ensure_sources_and_links(
+    skill_refs: list[SkillRef],
+    global_config_path: Path,
+    cache_root: Path,
+    skills_dir: Path,
+    *,
+    url_resolver: Callable[[str], str] | None,
+    progress: ProgressSink | None,
+    cloned_repos: set[str] | None = None,
+) -> SyncResult:
+    """Clone (never pull) every source a new skill needs, then link the skills.
+
+    Shared by ``enable``'s batch apply and the board's commit: callers write the
+    declarations first, so this is the only place that touches the cache and
+    the scope's link directory for freshly declared skills.
+    """
+    global_cfg = config.load_global_config(global_config_path)
+    resolver = url_resolver or sources.repo_url
+    ensured_sources: list[SourceEnsured] = []
+    seen_repos: set[str] = set()
+    for skill_ref in skill_refs:
+        if skill_ref.repo in seen_repos:
+            continue
+        seen_repos.add(skill_ref.repo)
+        # Never pulls: clone_source is a no-op for a cached source, so the
+        # live line only appears when this run actually fills the cache.
+        _progress_start(progress, f"preparing source {skill_ref.repo}...")
+        head = sources.clone_source(
+            skill_ref.repo, global_cfg, cache_root, url=resolver(skill_ref.repo)
+        )
+        _progress_done(progress, f"prepared source {skill_ref.repo} ({head[:8]})")
+        # "cloned" reports an actual cache fill by this run (clone_source
+        # never pulls, so a source not in cloned_repos was already cached).
+        action = "cloned" if (cloned_repos and skill_ref.repo in cloned_repos) else "up_to_date"
+        ensured_sources.append(SourceEnsured(repo=skill_ref.repo, commit=head, action=action))
+    config.save_global_config(global_config_path, global_cfg)
+    sync_result = SyncResult(sources=ensured_sources)
+    for skill_ref in skill_refs:
+        _progress_start(progress, f"linking {skill_ref.name}...")
+        link_result = links.ensure_link(skill_ref, cache_root, skills_dir)
+        sync_result.links.append(
+            LinkDone(name=skill_ref.name, action=link_result.action, target=link_result.target)
+        )
+        _progress_done(
+            progress,
+            f"{link_result.action} {skill_ref.name} -> {render.display_path(link_result.target)}",
+        )
+    return sync_result
 
 
 def run_disable(
@@ -1680,6 +1698,301 @@ def run_available_skills(
         for s in _scan_skills(repo_dir, cached_repo, include_all=include_all):
             skills.append({"name": s.name, "repo": cached_repo, "path": s.path})
     return AvailableSkillsResult(skills=skills)
+
+
+# ── board: one screen for enabling and disabling ─────────────────────────────
+
+
+def _cross_scope_conflict(
+    name: str, repo: str, path: str, other: tuple[str, str], *, global_scope: bool
+) -> str:
+    """One rejection sentence for a name declared in the other scope elsewhere."""
+    if global_scope:
+        return (
+            f"skill {name!r} is already enabled in the project (cwd) from {other[0]}:{other[1]}; "
+            f"enabling {repo}:{path} would create a cross-scope name conflict; "
+            f"disable it first: skill-manager disable {name}"
+        )
+    return (
+        f"skill {name!r} is already enabled globally from {other[0]}:{other[1]}; "
+        f"enabling {repo}:{path} would create a cross-scope name conflict; "
+        f"disable it first: skill-manager --global disable {name}"
+    )
+
+
+def _build_board(
+    declarations: config.SkillDeclarations,
+    cache_root: Path,
+    skills_dir: Path,
+    *,
+    scope: str,
+    other_scope: dict[str, tuple[str, str]] | None,
+    include_all: bool = False,
+) -> Board:
+    """Rows from every cached Source, plus declarations the cache cannot serve.
+
+    A declaration is matched to a scanned skill by ``(repo, path)`` - the
+    identity the config fixes - and the declared name wins on the row, so
+    unchecking it disables that declaration plus any other name sharing the
+    path, matching the commit's ``(repo, path)``-keyed disable. A declared skill
+    the scan skips (hidden, internal, or unqualified) still gets a row when its
+    ``SKILL.md`` is on disk, because it is declared and must be toggleable.
+    Declarations no cache can serve form the trailing "not in cache" group,
+    where unchecking is the only action that means anything.
+    """
+    declared_by_path = {(skill.repo, skill.path): skill for skill in declarations.skills}
+    other_is_project = scope == "global"
+
+    def overlap(skill_repo: str, name: str) -> tuple[bool, bool]:
+        if other_scope is None:
+            return False, False
+        hit = other_scope.get(name)
+        if hit is None:
+            return False, False
+        return True, hit[0] != skill_repo
+
+    def row(
+        name: str,
+        repo: str,
+        path: str,
+        description: str,
+        declaration: SkillRef | None,
+        *,
+        available: bool,
+    ) -> BoardRow:
+        globally, conflict = overlap(repo, declaration.name if declaration else name)
+        return BoardRow(
+            name=declaration.name if declaration else name,
+            repo=repo,
+            path=path,
+            description=description,
+            declared=declaration is not None,
+            link=(
+                _link_status(declaration, cache_root, skills_dir)
+                if declaration is not None
+                else "unlinked"
+            ),
+            enabled_globally=globally,
+            global_conflict=conflict,
+            other_scope_label="project" if other_is_project else "global",
+            available=available,
+        )
+
+    cached_repos = _list_cached_repos(cache_root)
+    declared_repos = {
+        skill.repo for skill in declarations.skills if (cache_root / skill.repo).is_dir()
+    }
+    groups: list[BoardGroup] = []
+    listed: set[tuple[str, str]] = set()
+    for repo in sorted(set(cached_repos) | declared_repos):
+        repo_dir = cache_root / repo
+        scanned = _scan_skills(repo_dir, repo, include_all=include_all) if repo_dir.is_dir() else []
+        rows: list[BoardRow] = []
+        seen_paths: set[str] = set()
+        for skill in scanned:
+            seen_paths.add(skill.path)
+            if (repo, skill.path) in declared_by_path:
+                listed.add((repo, skill.path))
+            rows.append(
+                row(
+                    skill.name,
+                    repo,
+                    skill.path,
+                    skill.description,
+                    declared_by_path.get((repo, skill.path)),
+                    available=True,
+                )
+            )
+        for declaration in sorted(
+            (s for s in declarations.skills if s.repo == repo and s.path not in seen_paths),
+            key=lambda s: (s.name, s.path),
+        ):
+            skill_md = repo_dir / declaration.path / "SKILL.md"
+            qualified = _qualify_skill(skill_md) if skill_md.is_file() else None
+            listed.add((repo, declaration.path))
+            rows.append(
+                row(
+                    declaration.name,
+                    repo,
+                    declaration.path,
+                    qualified[1] if qualified is not None else "",
+                    declaration,
+                    available=skill_md.is_file(),
+                )
+            )
+        if rows:
+            groups.append(
+                BoardGroup(repo=repo, rows=tuple(sorted(rows, key=lambda r: (r.name, r.path))))
+            )
+
+    missing = [
+        row(skill.name, skill.repo, skill.path, "", skill, available=False)
+        for skill in declarations.skills
+        if (skill.repo, skill.path) not in listed
+    ]
+    if missing:
+        groups.append(
+            BoardGroup(
+                repo=None,
+                rows=tuple(sorted(missing, key=lambda r: (r.name, r.repo, r.path))),
+            )
+        )
+    return Board(scope=scope, groups=tuple(groups))
+
+
+def _resolve_board_ui(ui: BoardUI | None) -> BoardUI:
+    """Use the injected adapter, else require a real terminal for the board."""
+    if ui is not None:
+        return ui
+    if not stdin_stdout_are_tty():
+        raise NotFoundError(
+            "the skill board needs a terminal; use 'enable <repo> <name>...' or "
+            "'disable <name>...' in scripts."
+        )
+    return QuestionaryBoard()
+
+
+def _reject_cross_scope(
+    batch: BoardPlan,
+    other_scope: dict[str, tuple[str, str]] | None,
+    *,
+    global_scope: bool,
+) -> None:
+    """Reject the whole commit when a new enable collides across scopes.
+
+    The board can only change one scope, so a conflict with the other scope is
+    not something this screen may resolve — it names the command that can, and
+    nothing is written.
+    """
+    if other_scope is None:
+        return
+    failures = [
+        _cross_scope_conflict(
+            ref.name, ref.repo, ref.path, other_scope[ref.name], global_scope=global_scope
+        )
+        for ref in batch.enable
+        if ref.name in other_scope and other_scope[ref.name][0] != ref.repo
+    ]
+    if failures:
+        raise NotFoundError("; ".join(failures))
+
+
+def _board_apply(
+    project_config: Path,
+    global_config_path: Path,
+    cache_root: Path,
+    skills_dir: Path,
+    *,
+    declarations: config.SkillDeclarations,
+    batch: BoardPlan,
+    global_hint: dict[str, tuple[str, str]] | None,
+    url_resolver: Callable[[str], str] | None,
+    progress: ProgressSink | None,
+) -> BoardResult:
+    """Commit one plan: declarations are written once, before any cache work.
+
+    Disable first, then enable, in one file write: a same-name swap (new source
+    for a name the other row held) therefore never leaves the scope without
+    that name on disk. A disable is keyed by the row's ``(repo, path)``: a
+    hand-written config may declare two names at one path, and unchecking the
+    row has to lift both, exactly as the checkbox implied.
+    """
+    drop_keys = {(ref.repo, ref.path) for ref in batch.disable}
+    disabled: list[DisableOutcome] = []
+    for skill in declarations.skills:
+        if (skill.repo, skill.path) not in drop_keys:
+            continue
+        removed, note = _clean_link(cache_root, skills_dir, skill, progress)
+        disabled.append(
+            DisableOutcome(
+                action="disabled",
+                skill={"name": skill.name, "repo": skill.repo, "path": skill.path},
+                link_removed=removed,
+                link_note=note,
+            )
+        )
+    declarations.skills = [s for s in declarations.skills if (s.repo, s.path) not in drop_keys]
+    declarations.skills.extend(batch.enable)
+    config.save_skill_declarations(project_config, declarations)
+    enabled = [
+        EnableOutcome(
+            action="enabled",
+            skill={"name": ref.name, "repo": ref.repo, "path": ref.path},
+            enabled_globally=(ref.name in global_hint) if global_hint is not None else None,
+        )
+        for ref in batch.enable
+    ]
+    sync = (
+        _ensure_sources_and_links(
+            list(batch.enable),
+            global_config_path,
+            cache_root,
+            skills_dir,
+            url_resolver=url_resolver,
+            progress=progress,
+        )
+        if batch.enable
+        else None
+    )
+    return BoardResult(disabled=disabled, enabled=enabled, sync=sync)
+
+
+def run_board(
+    project_config: Path,
+    global_config_path: Path,
+    cache_root: Path,
+    skills_dir: Path,
+    *,
+    url_resolver: Callable[[str], str] | None = None,
+    progress: ProgressSink | None = None,
+    ui: BoardUI | None = None,
+    include_all: bool = False,
+) -> BoardResult:
+    """Show the active scope's board and commit the returned selection.
+
+    The checked rows *are* the wanted state: undeclared rows that stay checked
+    are enabled, declared rows that get unchecked are disabled, and an
+    unchanged selection writes nothing. Validation is complete before the
+    first write — a same-name row checked twice or a cross-scope conflict
+    rejects the whole commit. ``ui`` is the interactive adapter (default:
+    questionary board); tests inject a fake. Cancel raises ``PickerCancelled``.
+    """
+    adapter = _resolve_board_ui(ui)
+    declarations = _load_declarations_for_enable(project_config)
+    global_hint, warnings = _load_global_enabled_hint(project_config)
+    global_scope = _is_global_scope(project_config)
+    other_scope = _load_project_hint(project_config) if global_scope else global_hint
+    board = _build_board(
+        declarations,
+        cache_root,
+        skills_dir,
+        scope="global" if global_scope else "project",
+        other_scope=other_scope,
+        include_all=include_all,
+    )
+    if board.is_empty:
+        raise NotFoundError(
+            "No cached repos found. Use 'skill-manager source add <repo>' to register a "
+            "source, or run 'skill-manager enable <owner/repo> <name>' to clone and "
+            "enable a skill directly."
+        )
+    batch = board_plan(board, adapter.select(board))
+    if batch.is_empty:
+        return BoardResult(warnings=warnings)
+    _reject_cross_scope(batch, other_scope, global_scope=global_scope)
+    result = _board_apply(
+        project_config,
+        global_config_path,
+        cache_root,
+        skills_dir,
+        declarations=declarations,
+        batch=batch,
+        global_hint=global_hint,
+        url_resolver=url_resolver,
+        progress=progress,
+    )
+    result.warnings = warnings
+    return result
 
 
 # ── top-level commands ────────────────────────────────────────────────────────
@@ -1827,6 +2140,38 @@ def disable(
     except PickerCancelled:
         _cancelled_exit(ctx)
     except (ConfigError, SourceError, LinkError, NotFoundError, UsageError) as e:
+        _handle_command_error(ctx, e)
+
+
+@app.command()
+def board(
+    ctx: typer.Context,
+    include_all: Annotated[
+        bool,
+        typer.Option(
+            "--all",
+            help="Include hidden (dot-dir) and internal skills.",
+        ),
+    ] = False,
+) -> None:
+    """Toggle the scope's skills on one screen (interactive terminal only)."""
+    try:
+        console = render.make_console()
+        decl_path, skills_dir = _scope_paths(ctx)
+        result = run_board(
+            decl_path,
+            paths.config_file(),
+            paths.repos_cache_dir(),
+            skills_dir,
+            include_all=include_all,
+            progress=render.Progress(console),
+        )
+        for warning in result.warnings:
+            _warn(warning["message"])
+        render.render_board(console, result)
+    except PickerCancelled:
+        _cancelled_exit(ctx)
+    except (BoardError, ConfigError, SourceError, LinkError, NotFoundError, UsageError) as e:
         _handle_command_error(ctx, e)
 
 
