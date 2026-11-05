@@ -381,9 +381,7 @@ def test_board_swaps_a_name_to_another_source(tmp_path: Path, make_source_repo) 
     assert _link_target(skills_dir, "read") == (cache / "cnife/other/skills/read").resolve()
 
 
-def test_board_all_lists_internal_skills_and_enables_them(
-    tmp_path: Path, make_source_repo
-) -> None:
+def test_board_all_lists_internal_skills_and_enables_them(tmp_path: Path, make_source_repo) -> None:
     """--all widens the board's scan like enable: internal rows may exist and enable."""
     project, cache, gconfig, skills_dir = _env(
         tmp_path,

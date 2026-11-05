@@ -1911,9 +1911,7 @@ def _board_apply(
                 link_note=note,
             )
         )
-    declarations.skills = [
-        s for s in declarations.skills if (s.repo, s.path) not in drop_keys
-    ]
+    declarations.skills = [s for s in declarations.skills if (s.repo, s.path) not in drop_keys]
     declarations.skills.extend(batch.enable)
     config.save_skill_declarations(project_config, declarations)
     enabled = [
