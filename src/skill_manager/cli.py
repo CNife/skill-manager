@@ -989,7 +989,7 @@ def _scan_skills(repo_dir: Path, repo: str, *, include_all: bool = False) -> lis
     Default (include_all=False): skip noise dir names, dot-directories, and
     skills with metadata.internal: true. Always stop recursion at a skill root
     (directory containing SKILL.md). Qualification (UTF-8 + FM name/description)
-    always applies; ``--all`` only widens noise/internal filters.
+    always applies; ``--all`` only widens the noise / dot-directory / internal filters.
     """
     del repo  # discovery name comes from FM, not the repo id
     skills: list[ScannedSkill] = []

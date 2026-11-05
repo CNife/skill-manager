@@ -12,7 +12,7 @@ Project Links live under `./.agents/skills/`; user-global Links under `~/.agents
 
 - **Declare and sync project skills** — write `.skill-manager.json`, run `skill-manager sync`
 - **Inspect source and link status** — `skill-manager list` (`linked` / `external` / `broken` / `unlinked`)
-- **Enable / disable** — one interactive board (`skill-manager board`) or non-interactive batch `enable <repo> <name>...` / `disable <name>...`
+- **Enable / disable** — one interactive board (`skill-manager board`) to do both in one screen; `enable` / `disable` still exist on their own — interactive picker (TTY, no args) or non-interactive batch `enable <repo> <name>...` / `disable <name>...`
 - **Manage source cache** — `skill-manager source list|add|remove|update|available-skills`
 - **Global skills** - `--global` flag applies any command to user-global skills (`~/.skill-manager.json`, `~/.agents/skills/`)
 - **Scripting / CI** — every command writes one compact JSON object when stdout is not a terminal (see [Output](#output)); no flag to remember
