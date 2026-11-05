@@ -1,5 +1,6 @@
 # no-mistakes gate configuration.
-# `commands` and `agent` are read from the trusted default branch (origin/main).
+# `commands`, `agent` and `test.instructions` are read from the trusted default
+# branch (origin/main).
 
 commands:
   prepare: "uv sync --locked --group dev"
