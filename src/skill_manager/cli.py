@@ -143,8 +143,13 @@ class SkillManagerGroup(TyperGroup):
 
 app = typer.Typer(
     name="skill-manager",
-    help="Project-scoped declarative skill manager for agent skills.",
-    no_args_is_help=True,
+    help=(
+        "Project-scoped declarative skill manager for agent skills.\n\n"
+        "Run with no command to open the skill board: one screen that enables "
+        "and disables the active scope's skills."
+    ),
+    no_args_is_help=False,
+    invoke_without_command=True,
     cls=SkillManagerGroup,
 )
 
@@ -334,12 +339,33 @@ def _root(
             help="Operate on user-global skills (~/.skill-manager.json, ~/.agents/skills/).",
         ),
     ] = False,
+    include_all: Annotated[
+        bool,
+        typer.Option(
+            "--all",
+            help="Also list hidden (dot-dir) and internal skills (skill board only).",
+        ),
+    ] = False,
 ) -> None:
-    """Project-scoped declarative skill manager for agent skills."""
+    """Project-scoped declarative skill manager for agent skills.
+
+    Run with no command to open the skill board: one screen that enables and
+    disables the active scope's skills.
+    """
     ctx.ensure_object(dict)
     # stdout decides the track: a TTY gets Human output, anything else JSON.
     ctx.obj["json"] = not render.is_tty()
     ctx.obj["global"] = global_scope
+    if ctx.invoked_subcommand is not None:
+        if include_all:
+            _handle_command_error(
+                ctx,
+                UsageError(
+                    "--all belongs to the skill board; run 'skill-manager --all' with no command."
+                ),
+            )
+        return
+    _run_board_command(ctx, include_all=include_all)
 
 
 # ── domain runners ────────────────────────────────────────────────────────────
@@ -1847,7 +1873,8 @@ def _resolve_board_ui(ui: BoardUI | None) -> BoardUI:
     if not stdin_stdout_are_tty():
         raise NotFoundError(
             "the skill board needs a terminal; use 'enable <repo> <name>...' or "
-            "'disable <name>...' in scripts."
+            "'disable <name>...' in scripts, or 'skill-manager --help' for the "
+            "command list."
         )
     return QuestionaryBoard()
 
@@ -2143,18 +2170,8 @@ def disable(
         _handle_command_error(ctx, e)
 
 
-@app.command()
-def board(
-    ctx: typer.Context,
-    include_all: Annotated[
-        bool,
-        typer.Option(
-            "--all",
-            help="Include hidden (dot-dir) and internal skills.",
-        ),
-    ] = False,
-) -> None:
-    """Toggle the scope's skills on one screen (interactive terminal only)."""
+def _run_board_command(ctx: typer.Context, *, include_all: bool) -> None:
+    """Open the skill board for the active scope and commit the selection."""
     try:
         console = render.make_console()
         decl_path, skills_dir = _scope_paths(ctx)

@@ -24,6 +24,7 @@ from helpers import skill_md
 from rich.console import Console
 from typer.testing import CliRunner
 
+import skill_manager.cli as cli
 from skill_manager.board import Board, BoardError, BoardGroup, BoardRow, counts, plan
 from skill_manager.cli import NotFoundError, app, run_board, run_sync
 from skill_manager.config import load_global_config, load_skill_declarations, save_global_config
@@ -532,16 +533,68 @@ def test_board_offers_a_declared_skill_the_scan_hides(tmp_path: Path, make_sourc
     assert all(group.repo is not None for group in ui.board.groups)
 
 
-def test_board_command_refuses_a_pipe(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """A piped invocation gets one JSON error, not a half-drawn screen."""
+def test_bare_invocation_refuses_a_pipe(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A piped bare invocation gets one JSON error, not a half-drawn screen."""
     monkeypatch.chdir(tmp_path)
-    result = runner.invoke(app, ["board"])
+    result = runner.invoke(app, [])
     assert result.exit_code == 1
     body = json.loads(result.stdout)
     assert body["ok"] is False
     assert body["error"]["code"] == "not_found"
     assert "needs a terminal" in body["error"]["message"]
     assert result.stderr == ""
+
+
+def test_bare_invocation_opens_the_board(
+    tmp_path: Path, make_source_repo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`skill-manager` with no command is the board: it commits like the screen."""
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg-config"))
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "xdg-cache"))
+    gconfig = tmp_path / "xdg-config" / "skill-manager" / "config.json"
+    cache = tmp_path / "xdg-cache" / "skill-manager" / "repos"
+    upstream = make_source_repo(
+        "waza",
+        {
+            "skills/read": skill_md("read", "Read things"),
+            "skills/write": skill_md("write", "Write things"),
+        },
+    )
+    project = tmp_path / "proj"
+    project.mkdir()
+    skills_dir = project / ".agents" / "skills"
+    cfg = load_global_config(gconfig)
+    clone_source("tw93/Waza", cfg, cache, url=f"file://{upstream}")
+    save_global_config(gconfig, cfg)
+    _write_config(project, [{"name": "read", "repo": "tw93/Waza", "path": "skills/read"}])
+    run_sync(project / ".skill-manager.json", gconfig, cache, skills_dir, result=SyncResult())
+    assert (skills_dir / "read").is_symlink()
+
+    monkeypatch.chdir(project)
+    monkeypatch.setattr(cli, "stdin_stdout_are_tty", lambda: True)
+    monkeypatch.setattr(cli, "QuestionaryBoard", lambda: ScriptedBoard(set()))
+    result = runner.invoke(app, [])
+    assert result.exit_code == 0, result.stdout
+    assert _declared(project) == []
+    assert not (skills_dir / "read").exists()
+
+
+def test_all_belongs_to_the_board_only(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """`--all` with a subcommand is a usage error, not a silently ignored flag."""
+    monkeypatch.chdir(tmp_path)
+    result = runner.invoke(app, ["--all", "list"])
+    assert result.exit_code == 2
+    body = json.loads(result.stdout)
+    assert body["error"]["code"] == "usage_error"
+    assert "--all belongs to the skill board" in body["error"]["message"]
+
+
+def test_board_subcommand_is_gone(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The screen is the bare invocation; `board` is not a command."""
+    monkeypatch.chdir(tmp_path)
+    result = runner.invoke(app, ["board"])
+    assert result.exit_code == 2
+    assert json.loads(result.stdout)["error"]["code"] == "usage_error"
 
 
 # ── rendering ────────────────────────────────────────────────────────────────

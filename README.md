@@ -12,7 +12,7 @@ Project Links live under `./.agents/skills/`; user-global Links under `~/.agents
 
 - **Declare and sync project skills** — write `.skill-manager.json`, run `skill-manager sync`
 - **Inspect source and link status** — `skill-manager list` (`linked` / `external` / `broken` / `unlinked`)
-- **Enable / disable** — one interactive board (`skill-manager board`) to do both in one screen; `enable` / `disable` still exist on their own — interactive picker (TTY, no args) or non-interactive batch `enable <repo> <name>...` / `disable <name>...`
+- **Enable / disable** — bare `skill-manager` opens one board that does both on one screen; `enable` / `disable` still exist on their own — interactive picker (TTY, no args) or non-interactive batch `enable <repo> <name>...` / `disable <name>...`
 - **Manage source cache** — `skill-manager source list|add|remove|update|available-skills`
 - **Global skills** - `--global` flag applies any command to user-global skills (`~/.skill-manager.json`, `~/.agents/skills/`)
 - **Scripting / CI** — every command writes one compact JSON object when stdout is not a terminal (see [Output](#output)); no flag to remember
@@ -49,9 +49,9 @@ Create `./.skill-manager.json` in your project:
 ## Usage
 
 ```bash
+skill-manager                          # interactive TTY: the board — enable and disable on one screen
 skill-manager sync                     # clone/fetch sources, link declared skills
 skill-manager list                     # show sources and skill status
-skill-manager board                    # interactive TTY: one screen to enable and disable
 skill-manager enable                   # interactive TTY: filterable source → multi-select skills
 skill-manager enable <repo> <name>...  # non-interactive batch enable (path derived from cache)
 skill-manager enable --all ...         # include hidden/internal skills when resolving
@@ -88,7 +88,7 @@ Skills
 
 ### Skill board
 
-`skill-manager board` is the one-screen way to change what a scope declares: it lists every available skill, grouped by source, with what is already declared checked. Space toggles, ↑/↓ move, type filters, Enter applies, Esc cancels.
+`skill-manager` with no command opens the board: the one-screen way to change what a scope declares. It lists every available skill, grouped by source, with what is already declared checked. Space toggles, ↑/↓ move, type filters, Enter applies, Esc cancels.
 
 ```
 ? Skills (project scope) unsaved +1 −1 (type · ↑↓ · space · enter=apply · Esc/Ctrl-C)
@@ -109,7 +109,7 @@ Skills
 - **Rows are grouped by source**, with declared skills the cache can no longer serve in a trailing `declared · not in cache` group — unchecking them removes the stale declaration.
 - **Two cross-scope marks**: `⊕` = also declared in the *other* scope from the *same* source (benign), `⚠` = declared in the other scope from a *different* source (a conflict); the detail line names the scope (`also enabled globally …` on a project board, `also enabled in this project …` on a global one). Link state is spelled out (`link broken`, `not linked`, `link outside this manager`) because the board can show it but `sync` is what fixes it.
 - **The commit is atomic**: a name checked twice, or a new enable that collides across scopes, rejects the whole batch before anything is written — the message names the `disable` / `--global disable` call that resolves it. Declaration edits land in one file write, then new sources are cloned (never pulled) and links created.
-- **Terminal only**: with stdout piped the command exits 1 with a JSON error; scripts keep using `enable <repo> <name>...` / `disable <name>...`.
+- **Terminal only**: with stdout piped the board exits 1 with a JSON error; scripts keep using `enable <repo> <name>...` / `disable <name>...`.
 - Hidden and internal skills are not listed by default (same rule as `enable`); a declared one still shows up so it can be turned off, and `--all` widens the listing exactly like it does for `enable`.
 
 ### Batch enable / disable
@@ -127,12 +127,12 @@ skill-manager disable read write                 # disable several skills
 
 ### Global skills
 
-Add `--global` to any of `sync` / `list` / `board` / `enable` / `disable` to target user-global skills instead of the project. The user's home is treated as a project: declarations live in `~/.skill-manager.json` and links land in `~/.agents/skills/`. Sources and the cache are shared across scopes.
+Add `--global` to a bare `skill-manager` or to any of `sync` / `list` / `enable` / `disable` to target user-global skills instead of the project. The user's home is treated as a project: declarations live in `~/.skill-manager.json` and links land in `~/.agents/skills/`. Sources and the cache are shared across scopes.
 
 ```bash
 skill-manager --global sync                  # link globally-declared skills into ~/.agents/skills/
 skill-manager --global list                  # show global skills status
-skill-manager --global board                 # same board, aimed at the global declaration
+skill-manager --global                       # the same board, aimed at the global declaration
 skill-manager --global enable <repo> <name>...  # declare globally + sync (batch)
 skill-manager --global disable <name>...        # remove global declarations + links (batch)
 skill-manager --global list | jq '.data.skills'   # JSON when stdout is piped
