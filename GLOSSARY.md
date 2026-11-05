@@ -56,6 +56,10 @@ _Avoid_: add, install, 添加, 安装
 从当前 Scope 的技能声明文件移除一条或多条 Skill declaration 并清理对应 Link；TTY 下可交互多选已启用项，也可 `disable <name>…` 非交互批量禁用（宽松：未启用的名字为幂等 no-op）。
 _Avoid_: remove, uninstall, 删除, 卸载
 
+**Board / 看板**:
+`skill-manager board` 打开的一屏界面：列出当前 Scope 全部可声明技能，按 Source 分节；每行的勾选状态就是目标声明态（新勾选 = 启用、取消勾选 = 禁用、同名换行 = 换源），空格切换、Enter 原子提交、Esc 取消。与交互式 `enable` / `disable` 的区别：Board 同时呈现两个方向，并在提交前校验整批。
+_Avoid_: TUI, manage screen, dashboard, 面板
+
 **Human output / 人类输出**:
 stdout 是 TTY 时的输出轨：由 `render` 模块用 Rich 渲染——结构化的走分节表格，进度/空态/错误走不成表的行流，长任务留一行原地刷新的实时行。带色，面向终端前的人。
 _Avoid_: text output, pretty output, 文本轨, 人读输出

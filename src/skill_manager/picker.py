@@ -1,4 +1,4 @@
-# ruff: noqa: RUF001
+# ruff: noqa: RUF001, RUF002
 """Interactive picker adapter for enable/disable (questionary-backed).
 
 Production UI is a thin customization of questionary/prompt_toolkit:
@@ -16,6 +16,8 @@ import unicodedata
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any, Protocol
+
+from skill_manager.board import Board, BoardGroup, BoardRow, counts
 
 
 class PickerCancelled(Exception):
@@ -91,6 +93,60 @@ class Picker(Protocol):
         Raises ``PickerCancelled`` on cancel.
         """
         ...
+
+
+class BoardUI(Protocol):
+    """Injectable adapter for the skill board (one screen, both directions)."""
+
+    def select(self, board: Board) -> list[str]:
+        """Multi-select row keys; also the commit.
+
+        Returns the checked ``BoardRow.key`` values (may be empty = no changes).
+        Raises ``PickerCancelled`` on cancel.
+        """
+        ...
+
+
+# One row's link state, spelled out: a declared skill whose symlink is off is a
+# state the user can see here and fix with ``sync``, so it is a word, not a glyph.
+_BOARD_LINK_WORDS = {
+    "broken": "link broken",
+    "unlinked": "not linked",
+    "external": "link outside this manager",
+}
+
+
+def board_section_title(group: BoardGroup) -> str:
+    """Heading for one group of rows (a Source, or the not-cached tail)."""
+    if group.repo is None:
+        return f"── declared · not in cache ({len(group.rows)}) ──"
+    return f"── {group.repo} ({len(group.rows)}) ──"
+
+
+def board_row_title(row: BoardRow) -> str:
+    """Row title: cross-scope mark, name, then any link state as words."""
+    mark = "⚠ " if row.global_conflict else ("⊕ " if row.enabled_globally else "")
+    title = f"{mark}{row.name}"
+    if not row.available:
+        return f"{title}  ·  {row.repo}"
+    if row.declared and row.link in _BOARD_LINK_WORDS:
+        return f"{title}  ·  {_BOARD_LINK_WORDS[row.link]}"
+    return title
+
+
+def board_row_description(row: BoardRow) -> str:
+    """The one line shown to the right of the pointed row."""
+    if not row.available:
+        parts = [f"declared from {row.repo}:{row.path} — not in cache"]
+    else:
+        parts = [row.path]
+    if row.global_conflict:
+        parts.append("enabled globally from a different source")
+    elif row.enabled_globally:
+        parts.append("also enabled globally (same source)")
+    if row.description:
+        parts.append(row.description)
+    return "  ·  ".join(parts)
 
 
 # ── display helpers (pure; unit-tested) ───────────────────────────────────────
@@ -275,12 +331,18 @@ def _make_inline_control():
     return InlineDescControl
 
 
-def _bind_filter_and_escape(bindings, ic, *, on_cancel) -> None:
-    """Type-to-filter; Esc clears non-empty filter, else cancels."""
+def _bind_filter_and_escape(bindings, ic, *, on_cancel, seek=None) -> None:
+    """Type-to-filter; Esc clears non-empty filter, else cancels.
+
+    ``seek`` re-lands the pointer after the filtered list changes: a board
+    filters separators too, so index 0 can be a heading rather than a row.
+    """
     from prompt_toolkit.keys import Keys
 
     def search_filter(event) -> None:
         ic.add_search_character(event.key_sequence[0].key)
+        if seek is not None:
+            seek()
 
     for character in string.printable:
         if character in string.whitespace:
@@ -289,12 +351,17 @@ def _bind_filter_and_escape(bindings, ic, *, on_cancel) -> None:
     bindings.add(Keys.Backspace, eager=True)(search_filter)
 
     @bindings.add(Keys.Escape, eager=True)
-    def escape(_event) -> None:
+    def escape(event) -> None:
         if ic.search_filter:
             ic.search_filter = None
             ic.pointed_at = 0
+            if seek is not None:
+                seek()
+            # Field edits do not repaint on their own; without this a stale
+            # frame keeps showing the old filter and rows.
+            event.app.invalidate()
             return
-        on_cancel(_event)
+        on_cancel(event)
 
 
 def _qa_select(message: str, choices: Sequence[Any], *, instruction: str, style) -> Any:
@@ -384,8 +451,16 @@ def _qa_checkbox(
     instruction: str,
     style,
     show_description: bool = True,
+    board: Board | None = None,
+    siblings: dict[str, Sequence[str]] | None = None,
 ) -> Any:
-    """Filterable multi-select; locked rows highlightable; space no-op on locked."""
+    """Filterable multi-select; locked rows highlightable; space no-op on locked.
+
+    ``board`` switches the prompt from a selection count to the board's live
+    ``unsaved +N −M`` counter, and ``siblings`` (row key -> keys sharing its
+    name) makes checking a row uncheck its same-name twin, so a swap is one
+    keystroke instead of uncheck-then-check.
+    """
     from prompt_toolkit.application import Application
     from prompt_toolkit.key_binding import KeyBindings
     from prompt_toolkit.keys import Keys
@@ -406,21 +481,35 @@ def _qa_checkbox(
         show_selected=False,
     )
 
+    def checked() -> list[str]:
+        return [
+            c.value
+            for c in ic.choices
+            if not isinstance(c, Separator) and c.value in ic.selected_options
+        ]
+
     def get_prompt_tokens():
         tokens = [
             ("class:qmark", "?"),
             ("class:question", f" {message} "),
         ]
+        if board is not None:
+            added, removed = counts(board, checked())
+            if ic.is_answered:
+                tokens.append(("class:answer", f"done (+{added} −{removed})"))
+            else:
+                if added or removed:
+                    tokens.append(("class:answer", f"unsaved +{added} −{removed} "))
+                tokens.append(("class:instruction", instruction))
+            return tokens
         if ic.is_answered:
             n = len(
                 [
                     c
                     for c in ic.choices
-                    if (
-                        not isinstance(c, Separator)
-                        and c.value in ic.selected_options
-                        and not c.disabled
-                    )
+                    if not isinstance(c, Separator)
+                    and c.value in ic.selected_options
+                    and not c.disabled
                 ]
             )
             tokens.append(("class:answer", "done" if n == 0 else f"done ({n} selections)"))
@@ -441,13 +530,16 @@ def _qa_checkbox(
     @bindings.add(" ", eager=True)
     def toggle(_event) -> None:
         choice = ic.get_pointed_at()
-        if choice.disabled:
+        if isinstance(choice, Separator) or choice.disabled:
             return
         val = choice.value
         if val in ic.selected_options:
             ic.selected_options.remove(val)
-        else:
-            ic.selected_options.append(val)
+            return
+        for twin in (siblings or {}).get(val, ()):
+            if twin != val and twin in ic.selected_options:
+                ic.selected_options.remove(twin)
+        ic.selected_options.append(val)
 
     def move_down(_event) -> None:
         ic.select_next()
@@ -466,9 +558,16 @@ def _qa_checkbox(
 
     bindings.add(Keys.Down, eager=True)(move_down)
     bindings.add(Keys.Up, eager=True)(move_up)
+
+    def seek_row() -> None:
+        guard = 0
+        while isinstance(ic.get_pointed_at(), Separator) and guard < ic.choice_count:
+            ic.select_next()
+            guard += 1
+
     bindings.add(Keys.ControlN, eager=True)(move_down)
     bindings.add(Keys.ControlP, eager=True)(move_up)
-    _bind_filter_and_escape(bindings, ic, on_cancel=cancel)
+    _bind_filter_and_escape(bindings, ic, on_cancel=cancel, seek=seek_row)
 
     @bindings.add(Keys.ControlM, eager=True)
     def submit(event) -> None:
@@ -574,6 +673,43 @@ class QuestionaryPicker:
                 instruction="(type · ↑↓ · space · enter · Esc/Ctrl-C) ",
                 style=style,
                 show_description=False,
+            )
+        )
+        return list(selected or [])
+
+
+class QuestionaryBoard:
+    """Default terminal board: every scope skill on one screen, both directions."""
+
+    def select(self, board: Board) -> list[str]:
+        from questionary import Choice
+        from questionary.prompts.common import Separator
+
+        style = _q_style()
+        choices: list[Any] = []
+        keys_by_name: dict[str, list[str]] = {}
+        for group in board.groups:
+            choices.append(Separator(board_section_title(group)))
+            for row in group.rows:
+                choices.append(
+                    Choice(
+                        title=board_row_title(row),
+                        value=row.key,
+                        description=board_row_description(row),
+                        checked=row.declared,
+                    )
+                )
+                keys_by_name.setdefault(row.name, []).append(row.key)
+        siblings = {row.key: keys_by_name[row.name] for row in board.rows}
+        selected = _ask(
+            _qa_checkbox(
+                f"Skills ({board.scope} scope)",
+                choices,
+                instruction="(type · ↑↓ · space · enter=apply · Esc/Ctrl-C) ",
+                style=style,
+                show_description=True,
+                board=board,
+                siblings=siblings,
             )
         )
         return list(selected or [])

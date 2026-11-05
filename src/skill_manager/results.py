@@ -147,6 +147,20 @@ class DisableResult:
         return {"results": [o.to_data() for o in self.outcomes]}
 
 
+@dataclass
+class BoardResult:
+    """One board commit: skills dropped, skills added, and the sync it caused.
+
+    Human-track only (the board needs a terminal), so there is no ``to_data``:
+    the JSON track never reaches a committed board.
+    """
+
+    disabled: list[DisableOutcome] = field(default_factory=list)
+    enabled: list[EnableOutcome] = field(default_factory=list)
+    sync: SyncResult | None = None
+    warnings: list[dict[str, str]] = field(default_factory=list)
+
+
 # ── source ────────────────────────────────────────────────────────────────────
 
 

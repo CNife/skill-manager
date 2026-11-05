@@ -31,6 +31,7 @@ from rich.text import Text
 
 from skill_manager.results import (
     AvailableSkillsResult,
+    BoardResult,
     DisableResult,
     DoctorProblem,
     DoctorResult,
@@ -453,6 +454,33 @@ def render_disable(console: Console, result: DisableResult) -> None:
     render_outcomes(console, outcomes)
 
 
+def render_board(console: Console, result: BoardResult) -> None:
+    """``board``: one line per committed change, then the sync it triggered."""
+    outcomes: list[Outcome] = [
+        Outcome(outcome.skill["name"], "disabled", outcome.link_note) for outcome in result.disabled
+    ]
+    outcomes.extend(
+        Outcome(
+            outcome.skill["name"],
+            "enabled",
+            f"{outcome.skill['repo']}:{outcome.skill['path']}",
+            mark=_overlap_mark(outcome.enabled_globally, outcome.global_conflict),
+        )
+        for outcome in result.enabled
+    )
+    if not outcomes and result.sync is None:
+        render_note(console, "No changes.")
+        return
+    if outcomes:
+        render_outcomes(console, outcomes)
+        if any(o.mark == "⚠" for o in outcomes):
+            _legend(console, _GLOBAL_LEGEND)
+        elif any(o.mark for o in outcomes):
+            _legend(console, _GLOBAL_MARK_LEGEND)
+    if result.sync is not None:
+        render_sync(console, result.sync)
+
+
 def render_available_skills(console: Console, result: AvailableSkillsResult) -> None:
     """``source available-skills``: one section per repo, skill and path."""
     if not result.skills:
@@ -506,6 +534,7 @@ __all__ = [
     "is_tty",
     "make_console",
     "render_available_skills",
+    "render_board",
     "render_disable",
     "render_doctor",
     "render_enable",
