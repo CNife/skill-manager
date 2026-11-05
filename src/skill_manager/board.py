@@ -102,6 +102,8 @@ def plan(board: Board, selected_keys: Sequence[str]) -> BoardPlan:
 
     Raises :class:`BoardError` when two checked rows carry the same name (the
     declaration file cannot hold both), or when a key is not on this board.
+    A disable row is keyed by ``(repo, path)``: the commit lifts every
+    declaration at that key, so the checkbox always describes the disk.
     """
     selected = list(dict.fromkeys(selected_keys))
     by_key = {row.key: row for row in board.rows}

@@ -24,7 +24,7 @@ from rich.console import Console
 from typer.testing import CliRunner
 
 from skill_manager.board import Board, BoardError, BoardGroup, BoardRow, counts, plan
-from skill_manager.cli import NotFoundError, app, run_board
+from skill_manager.cli import NotFoundError, app, run_board, run_sync
 from skill_manager.config import load_global_config, load_skill_declarations, save_global_config
 from skill_manager.picker import PickerCancelled, board_row_description, board_row_title
 from skill_manager.render import render_board
@@ -281,6 +281,27 @@ def test_board_disables_unchecked_declaration(tmp_path: Path, make_source_repo) 
     assert _declared(project) == []
     assert not (skills_dir / "read").exists()
     assert not (skills_dir / "read").is_symlink()
+
+
+def test_board_unchecks_every_name_at_one_path(tmp_path: Path, make_source_repo) -> None:
+    """Two hand-written names on one path share the row: unchecking lifts both."""
+    project, cache, gconfig, skills_dir = _env(tmp_path, make_source_repo)
+    _write_config(
+        project,
+        [
+            {"name": "read", "repo": "tw93/Waza", "path": "skills/read"},
+            {"name": "alias", "repo": "tw93/Waza", "path": "skills/read"},
+        ],
+    )
+    run_sync(project / ".skill-manager.json", gconfig, cache, skills_dir, result=SyncResult())
+    assert (skills_dir / "read").is_symlink() and (skills_dir / "alias").is_symlink()
+
+    result = run_board(
+        project / ".skill-manager.json", gconfig, cache, skills_dir, ui=ScriptedBoard(set())
+    )
+    assert [o.skill["name"] for o in result.disabled] == ["read", "alias"]
+    assert _declared(project) == []
+    assert not (skills_dir / "read").exists() and not (skills_dir / "alias").exists()
 
 
 def test_board_swaps_a_name_to_another_source(tmp_path: Path, make_source_repo) -> None:

@@ -1733,7 +1733,8 @@ def _build_board(
 
     A declaration is matched to a scanned skill by ``(repo, path)`` - the
     identity the config fixes - and the declared name wins on the row, so
-    unchecking it disables a declaration that actually exists. A declared skill
+    unchecking it disables that declaration plus any other name sharing the
+    path, matching the commit's ``(repo, path)``-keyed disable. A declared skill
     the scan skips (hidden, internal, or unqualified) still gets a row when its
     ``SKILL.md`` is on disk, because it is declared and must be toggleable.
     Declarations no cache can serve form the trailing "not in cache" group,
@@ -1890,14 +1891,14 @@ def _board_apply(
 
     Disable first, then enable, in one file write: a same-name swap (new source
     for a name the other row held) therefore never leaves the scope without
-    that name on disk.
+    that name on disk. A disable is keyed by the row's ``(repo, path)``: a
+    hand-written config may declare two names at one path, and unchecking the
+    row has to lift both, exactly as the checkbox implied.
     """
-    by_name = {skill.name: skill for skill in declarations.skills}
+    drop_keys = {(ref.repo, ref.path) for ref in batch.disable}
     disabled: list[DisableOutcome] = []
-    dropped: set[str] = set()
-    for ref in batch.disable:
-        skill = by_name.get(ref.name)
-        if skill is None:
+    for skill in declarations.skills:
+        if (skill.repo, skill.path) not in drop_keys:
             continue
         removed, note = _clean_link(cache_root, skills_dir, skill, progress)
         disabled.append(
@@ -1908,8 +1909,9 @@ def _board_apply(
                 link_note=note,
             )
         )
-        dropped.add(skill.name)
-    declarations.skills = [s for s in declarations.skills if s.name not in dropped]
+    declarations.skills = [
+        s for s in declarations.skills if (s.repo, s.path) not in drop_keys
+    ]
     declarations.skills.extend(batch.enable)
     config.save_skill_declarations(project_config, declarations)
     enabled = [
