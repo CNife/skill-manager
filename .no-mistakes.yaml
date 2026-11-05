@@ -1,0 +1,27 @@
+# no-mistakes gate configuration.
+# `commands` and `agent` are read from the trusted default branch (origin/main).
+
+commands:
+  prepare: "uv sync --locked --group dev"
+  lint: "uv run ruff check . && uv run ruff format --check ."
+  format: "uv run ruff format ."
+  # Targeted local validation. The suite is small and is the project's only
+  # executable surface; broad regression stays in GitHub CI.
+  test: "uv run pytest -q"
+
+document:
+  instructions: |
+    README.md is the English, user-facing product surface (install, CLI usage,
+    output contract, features). Keep it English and free of internal agent workflow.
+    docs/adr/ holds one Chinese ADR per resolved design decision: add a new numbered
+    ADR instead of rewriting an existing one.
+    GLOSSARY.md holds the Chinese domain vocabulary; a new domain term belongs there.
+    docs/agents/ describes agent workflow, not the product.
+
+test:
+  instructions: |
+    This is a CLI. Drive it as `uv run skill-manager ...` with XDG_CONFIG_HOME and
+    XDG_CACHE_HOME pointed at a temporary directory, the way tests/ does with
+    tmp_path. Never write into the developer's real ~/.config/skill-manager or
+    ~/.cache/skill-manager. Non-TTY stdout is a single compact JSON object; assert
+    on that envelope rather than on Rich-rendered terminal text.
