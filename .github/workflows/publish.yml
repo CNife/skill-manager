@@ -48,7 +48,12 @@ jobs:
 
       - name: Ensure tag commit is on main
         run: |
-          git fetch origin main
+          # checkout@v4 resolves the (possibly annotated) tag to a commit and
+          # force-fetches `+<commit>:refs/tags/<tag>`, which overwrites the
+          # annotated tag object locally (actions/checkout#882). Re-fetch the
+          # real tag object so `%(contents)` reads the annotation, not the
+          # commit message.
+          git fetch --force origin main "+refs/tags/${GITHUB_REF_NAME}:refs/tags/${GITHUB_REF_NAME}"
           TAG_COMMIT="$(git rev-parse "${GITHUB_REF_NAME}^{commit}")"
           if ! git merge-base --is-ancestor "$TAG_COMMIT" origin/main; then
             echo "Tag ${GITHUB_REF_NAME} (${TAG_COMMIT}) is not an ancestor of origin/main; refusing to publish."
