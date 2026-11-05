@@ -45,6 +45,10 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          # The tag that triggered this run is checked out as a lightweight ref
+          # by default, so `git tag --format='%(contents)'` would read the
+          # commit message instead of the annotation. Fetch real tag objects.
+          fetch-tags: true
 
       - name: Ensure tag commit is on main
         run: |
