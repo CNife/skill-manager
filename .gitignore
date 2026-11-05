@@ -19,3 +19,6 @@ src/skill_manager/_version.py
 
 # subagent scratch artifacts
 .pi-subagents/
+
+# gate verification scratch (throwaway remotes created by a review/test pass)
+/verify-*/
